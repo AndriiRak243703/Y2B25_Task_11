@@ -7,7 +7,7 @@ from datetime import datetime
 import numpy as np
 
 # Import wrapper
-from aaron_ot2_wrapper import OT2Env
+from andrii_ot2_gym_wrapper import OT2Env
 
 # ============================================================================
 # CONFIGURATION
@@ -104,12 +104,12 @@ class OT2Callback(BaseCallback):
 task_name = f'OT2_RL_{PERSON_NAME}_{timestamp}'
 
 task = Task.init(
-    project_name='Mentor Group - Jason/Group 1', 
+    project_name='Mentor Group - Myrthe/Group 1', 
     task_name=task_name,
 )
 
 task.set_repo(
-    repo='https://github.com/AaronCiuffo245484/Y2B25_Task_11.git',
+    repo='https://github.com/AndriiRak243703/Y2B25_Task_11.git',
     branch=BRANCH_NAME
 )
 
