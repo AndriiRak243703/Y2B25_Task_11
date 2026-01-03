@@ -27,7 +27,7 @@ class OT2Callback(BaseCallback):
     Callback for logging OT2-specific metrics during training.
     """
     
-    def __init__(self, threshold=0.005, verbose=0):
+    def __init__(self, threshold=0.001, verbose=0):
         super().__init__(verbose)
         self.threshold = threshold
         self.episode_rewards = []
