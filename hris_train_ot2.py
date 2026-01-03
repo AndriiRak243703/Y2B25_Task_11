@@ -55,7 +55,7 @@ def main():
     task.set_base_docker('node:16,python:3.10')
     
     # Trigger remote execution on the GPU queue
-    task.execute_remotely(queue_name='compute', exit_process=True)
+    task.execute_remotely(queue_name='default', exit_process=True)
 
     # --- 4. TRAINING DEPLOYMENT ---
     env = OT2Env(render=False)
