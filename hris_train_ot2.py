@@ -48,7 +48,7 @@ def main():
     # Project naming must follow the group standard
     task = Task.init(
         project_name='Mentor Group - Jason/Group 1', 
-        task_name=f'{PERSON_NAME}_Addiction_Maximus'
+        task_name='hris_Addiction_Maximus_V2'
     )
 
     # Set the remote infrastructure configuration
