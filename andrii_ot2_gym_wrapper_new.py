@@ -176,7 +176,7 @@ class OT2Env(gym.Env):
         Settling requires staying within target threshold for multiple consecutive steps.
         """
         # Time penalty - punish every step
-        time_penalty = -0.05
+        time_penalty = -0.1
         
         # Distance penalty - punish being far from goal
         distance_penalty = -10.0 * distance_to_goal
