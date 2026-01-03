@@ -53,10 +53,12 @@ def main():
 
     # Set the remote infrastructure configuration
     # Update this line (usually around line 45-50):
-    task.set_base_docker('deanis/2023y2b-rl:latest')
+    # Change this line in your hris_train_ot2.py script:
+    task.set_base_docker('deanis/2023y2b-rl:latest') #
     
     # Trigger remote execution on the GPU queue
-    task.execute_remotely(queue_name='default', exit_process=True)
+    # Ensure this line is exactly:
+    task.execute_remotely(queue_name="default") #
 
     # --- 4. TRAINING DEPLOYMENT ---
     env = OT2Env(render=False)
