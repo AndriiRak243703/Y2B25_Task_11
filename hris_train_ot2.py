@@ -52,7 +52,8 @@ def main():
     )
 
     # Set the remote infrastructure configuration
-    task.set_base_docker('node:16,python:3.10')
+    # Update this line (usually around line 45-50):
+    task.set_base_docker('deanis/2023y2b-rl:latest')
     
     # Trigger remote execution on the GPU queue
     task.execute_remotely(queue_name='default', exit_process=True)
