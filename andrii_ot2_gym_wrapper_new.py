@@ -176,15 +176,15 @@ class OT2Env(gym.Env):
         Settling requires staying within target threshold for multiple consecutive steps.
         """
         # Time penalty - punish every step
-        time_penalty = -0.1
+        time_penalty = -0.05
         
         # Distance penalty - punish being far from goal
         distance_penalty = -10.0 * distance_to_goal
         
         # High velocity near the goal penalty - prevents overshoot
         velocity_magnitude = np.linalg.norm(velocity)
-        if distance_to_goal < 0.01:
-            high_velocity_penalty = -velocity_magnitude * 10
+        if distance_to_goal < 0.03:
+            high_velocity_penalty = -velocity_magnitude * 5
         else:
             high_velocity_penalty = 0.0
 
