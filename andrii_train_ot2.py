@@ -128,7 +128,7 @@ parser.add_argument("--n_steps", type=int, default=2048)
 parser.add_argument("--total_timesteps", type=int, default=500000)
 parser.add_argument("--gamma", type=float, default=0.99)
 parser.add_argument("--max_steps_truncate", type=int, default=300)
-parser.add_argument("--target_threshold", type=float, default=0.005)
+parser.add_argument("--target_threshold", type=float, default=0.001)
 args = parser.parse_args()
 
 # Execute remotely
