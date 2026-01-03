@@ -46,10 +46,11 @@ def main():
 
     # --- 3. CLEARML TASK INITIALIZATION ---
     # Project naming must follow the group standard
+# Modify your Task.init in main()
     task = Task.init(
-        project_name='Mentor Group - Jason/Group 1', 
-        task_name='hris_Addiction_Maximus_V2'
-    )
+    project_name='Mentor Group J/Group 1', # Ensure this matches your mentor group
+    task_name='hris_Maximus_V2_Clean'      # Use a new name to force a new task
+)
 
     # Set the remote infrastructure configuration
     # Update this line (usually around line 45-50):
