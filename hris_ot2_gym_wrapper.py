@@ -52,46 +52,26 @@ class OT2Env(gym.Env):
         # Standardize return observation
         return (delta * 10.0).astype(np.float32), {}
 
-    def step(self, action):
-        self.steps += 1
-        # Execute action in the simulation
-        pipette_pos = self.sim.run_step(action) 
+    def reset(self, seed=None, options=None):
+        super().reset(seed=seed)
+        self.steps = 0
+        self.stagnation_timer = 0 
+        self.unlocked_tiers = [False] * len(self.tiers)
         
-        delta = self.goal_pos - pipette_pos
-        curr_dist = np.linalg.norm(delta)
-        diff = self.prev_dist - curr_dist
+        # FIX: The simulation reset returns a dict, not just a list/array
+        reset_info = self.sim.reset() 
         
-        # --- REWARD LOGIC ---
-        
-        # 1. THE AMYGDALA WITHDRAWAL (Anti-Stagnation)
-        if diff > 0.0002: # Significant progress toward goal
-            reward = diff * 1500 
-            self.stagnation_timer = 0 
+        # Extract the specific position array from the dictionary
+        # If the key is different in your sim_class version, double check sim_class.py
+        pipette_pos = np.array(reset_info['pipette_position'], dtype=np.float32)
+
+        # SUCCESS PRIMING logic...
+        if random.random() < 0.10:
+            self.goal_pos = pipette_pos + np.random.uniform(-0.005, 0.005, size=3)
         else:
-            self.stagnation_timer += 1
-            # Penalty increases the longer we stay still
-            withdrawal_penalty = 0.3 * (1 + (self.stagnation_timer / 10.0))
-            reward = -withdrawal_penalty
+            self.goal_pos = np.array([0.18, 0.18, 0.10], dtype=np.float32)
 
-        # 2. THE DOPAMINE STAIRCASE (Tiered Rewards)
-        for i, threshold in enumerate(self.tiers):
-            if curr_dist < threshold and not self.unlocked_tiers[i]:
-                # Variable Reward Bonus to prevent the agent from getting "stuck" on specific thresholds
-                bonus = random.uniform(0, self.tier_rewards[i] * 0.2)
-                reward += self.tier_rewards[i] + bonus
-                self.unlocked_tiers[i] = True
-
-        # 3. MAGNETISM (Exponential Reward for proximity)
-        reward += 0.05 / (curr_dist + 0.0005)
-
-        # Termination condition (Within 0.8mm)
-        terminated = bool(curr_dist < 0.0008)
-        if terminated: 
-            reward += 1000.0
-            
-        self.prev_dist = curr_dist
+        delta = self.goal_pos - pipette_pos # This will now work!
+        self.prev_dist = np.linalg.norm(delta)
         
-        # Truncation condition (Max steps per episode)
-        truncated = self.steps >= 1000
-        
-        return (delta * 10.0).astype(np.float32), float(reward), terminated, truncated, {}
+        return (delta * 10.0).astype(np.float32), {}
