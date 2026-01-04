@@ -54,7 +54,15 @@ def main():
     
     task.set_repo(repo='https://github.com/AndriiRak243703/Y2B25_Task_11.git', branch='hris/rl-training')
     task.set_base_docker('deanis/2023y2b-rl:latest')
-    task.set_packages(['tensorboard', 'clearml', 'gymnasium', 'stable-baselines3', 'pybullet', 'plotly'])
+    # Update this line in hris_train_ot2.py
+    task.set_packages([
+    'tensorboard', 
+    'clearml', 
+    'gymnasium', 
+    'stable-baselines3', 
+    'pybullet', 
+    'plotly==5.18.0' # Specific version forces a refresh
+])
 
     task.execute_remotely(queue_name='default')
 
