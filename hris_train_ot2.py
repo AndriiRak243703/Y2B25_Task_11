@@ -6,6 +6,7 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback
 from hris_ot2_gym_wrapper import OT2Env
 
+# Custom Callback for Plots and Console
 class MaximusCallback(BaseCallback):
     def __init__(self, log_freq=2048):
         super().__init__()
@@ -15,17 +16,17 @@ class MaximusCallback(BaseCallback):
         print("-" * 45)
 
     def _on_step(self) -> bool:
-        # Collect current 3D position (un-normalize for plotting)
+        # Save raw pipette position for Plotly (obs[0:3])
         obs = self.locals['new_obs'][0]
         self.trajectory.append(obs[:3])
 
         if self.n_calls % self.log_freq == 0:
-            # Calculate distance in mm for console
-            dist_mm = (np.linalg.norm(obs[:3] - obs[3:]) * 100.0) # Approx scale
+            # Distance calc for logging (approximate)
+            dist_mm = np.linalg.norm(obs[:3] - obs[3:]) * 100.0 
             status = "💎 PERFECT" if dist_mm < 1.0 else "🔥 HOT"
             print(f"{self.num_timesteps:<10} | {dist_mm:>10.2f} mm | {status}")
             
-            # Send 3D Plot to ClearML
+            # Send the 3D Plot to ClearML
             self._report_plot()
         return True
 
@@ -34,25 +35,21 @@ class MaximusCallback(BaseCallback):
         fig = go.Figure(data=[go.Scatter3d(
             x=path[:, 0], y=path[:, 1], z=path[:, 2],
             mode='lines',
-            line=dict(color='red', width=3)
+            line=dict(color='cyan', width=4)
         )])
-        fig.update_layout(title=f"Robot Trajectory at Step {self.num_timesteps}")
+        fig.update_layout(title=f"Robot Trajectory Step {self.num_timesteps}")
         
         Task.current_task().get_logger().report_plotly(
-            title="Movement Path", series="Trajectory", iteration=self.num_timesteps, figure=fig
+            title="3D Path", series="Live Trajectory", iteration=self.num_timesteps, figure=fig
         )
-        self.trajectory = [] # Reset for next batch
+        self.trajectory = [] # Clear memory for next block
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--total_timesteps", type=int, default=2000000)
-    args = parser.parse_args()
-
-    # 1. ClearML Setup
+    # ClearML Remote Setup
     task = Task.init(
-        project_name='Mentor Group - Jason/Group 1', 
+        project_name='Mentor Group - Myrthe/Group 1', 
         task_name='hris_Addiction_Maximus_FINAL_PLOT',
-        reuse_last_task_id=False
+        reuse_last_task_id=False # Fixes Docker/Connection errors
     )
     
     task.set_repo(repo='https://github.com/AndriiRak243703/Y2B25_Task_11.git', branch='hris/rl-training')
@@ -61,13 +58,25 @@ def main():
 
     task.execute_remotely(queue_name='default')
 
-    # 2. Training
+    # Environment and Model Initialization
     env = OT2Env(render=False)
-    model = PPO("MlpPolicy", env, learning_rate=5e-5, verbose=1, tensorboard_log="./logs/")
+    model = PPO(
+        "MlpPolicy", 
+        env, 
+        learning_rate=5e-5, 
+        gamma=0.98,
+        verbose=1, 
+        tensorboard_log="./logs/"
+    )
 
-    print("--- DEPLOYING HRIS ADDICTION MAXIMUS WITH PLOTS ---")
-    model.learn(total_timesteps=args.total_timesteps, callback=MaximusCallback())
-    model.save("maximus_final_model")
+    print("--- DEPLOYING HRIS ADDICTION MAXIMUS (MYRTHE PROJECT) ---")
+    
+    try:
+        model.learn(total_timesteps=2000000, callback=MaximusCallback())
+        model.save("hris_maximus_final")
+        task.upload_artifact("trained_model", artifact_object="hris_maximus_final.zip")
+    except KeyboardInterrupt:
+        model.save("hris_maximus_interrupted")
 
 if __name__ == "__main__":
     main()
