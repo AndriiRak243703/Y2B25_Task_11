@@ -20,43 +20,31 @@ class AdvancedMonitorCallback(BaseCallback):
         self.check_freq = check_freq
         self.save_path = save_path
         self.best_mean_reward = -np.inf
-        self.best_precision = np.inf  # Best distance to target
+        self.best_precision = np.inf
         self.last_improvement = 0
-        self.max_no_improvement = 50_000  # Steps without improvement
+        self.max_no_improvement = 50_000
         
         # Data buffers
         self.current_trajectory = []
-        self.velocity_samples = []  # Added buffer for velocity
+        self.velocity_samples = []
         self.best_trajectories = []
         
-        # Ensure save directory exists
         os.makedirs(save_path, exist_ok=True)
 
     def _init_callback(self) -> None:
-        # ClearML logger initialization
+        # Just initialize the logger, do not try to pre-plot empty graphs
         self.clearml_logger = Logger.current_logger()
-        
-        # Register custom plots layout in ClearML
-        if self.clearml_logger:
-            self.clearml_logger.report_scatter2d(
-                title="Workspace Coverage",
-                series="Positions",
-                iteration=0,
-                xaxis="X Position",
-                yaxis="Y Position",
-                mode='markers'
-            )
 
     def _on_step(self) -> bool:
-        # 1. Capture Info from the environment
-        info = self.locals['infos'][0] # Assuming Single Env (DummyVecEnv)
+        # 1. Capture Info
+        info = self.locals['infos'][0]
         
         # 2. Trajectory Tracking
         if 'position' in info:
             pos = info['position']
             self.current_trajectory.append(pos.copy())
             
-        # 3. Velocity Tracking (Fixed: Populate the buffer)
+        # 3. Velocity Tracking
         if 'velocity' in info:
             self.velocity_samples.append(info['velocity'])
 
@@ -68,17 +56,14 @@ class AdvancedMonitorCallback(BaseCallback):
         if self.n_calls - self.last_improvement > self.max_no_improvement:
             if self.verbose > 0:
                 print(f"🛑 Stopping early after {self.n_calls} steps with no improvement")
-            return False  # Stop training
+            return False
         
         return True
 
     def _on_rollout_end(self) -> None:
-        """End of rollout handling (updates graphs and scalar metrics)"""
-        # We check if the environment is actually done
         if self.locals['dones'][0]: 
             info = self.locals['infos'][0]
             
-            # Log precision metrics
             distance = info.get('distance', 0.0)
             velocity = info.get('velocity', 0.0)
             
@@ -88,92 +73,54 @@ class AdvancedMonitorCallback(BaseCallback):
                 self.clearml_logger.report_scalar(
                     "Velocity Control", "Final Speed (mm/s)", velocity * 1000, self.n_calls)
             
-            # Track best precision
             if distance < self.best_precision:
                 self.best_precision = distance
                 self.last_improvement = self.n_calls
-                # Save trajectory if sub-millimeter precision
                 if distance < 0.001: 
                     self._save_best_trajectory()
             
-            # Reset trajectory buffer for the next episode
             self.current_trajectory = []
 
     def _evaluate_and_log(self):
-        """Comprehensive evaluation and logging"""
-        # Get current policy performance
         episode_rewards = self.model.ep_info_buffer or []
         if episode_rewards and len(episode_rewards) > 0:
             mean_reward = np.mean([ep['r'] for ep in episode_rewards])
             mean_length = np.mean([ep['l'] for ep in episode_rewards])
             
-            # Update best model if improved based on Reward
             if mean_reward > self.best_mean_reward:
                 self.best_mean_reward = mean_reward
                 self.model.save(os.path.join(self.save_path, "best_model"))
-                
-                # Upload artifact
                 if Task.current_task():
                     Task.current_task().upload_artifact(
                         name=f"best_model_step_{self.n_calls}", 
                         artifact_object=os.path.join(self.save_path, "best_model.zip")
                     )
             
-            # Log general training metrics
             if self.clearml_logger:
                 self.clearml_logger.report_scalar(
                     "Training", "Mean Reward", mean_reward, self.n_calls)
                 self.clearml_logger.report_scalar(
                     "Training", "Episode Length", mean_length, self.n_calls)
             
-            # Learning rate monitoring
-            lr = self.model.policy.optimizer.param_groups[0]['lr']
-            if self.clearml_logger:
-                self.clearml_logger.report_scalar("Training", "Learning Rate", lr, self.n_calls)
-            
-            # Velocity distribution analysis
             if len(self.velocity_samples) > 0:
                 avg_speed = np.mean(self.velocity_samples)
-                max_speed = np.max(self.velocity_samples)
                 if self.clearml_logger:
                     self.clearml_logger.report_scalar(
                         "Velocity Analysis", "Average Speed (m/s)", avg_speed, self.n_calls)
-                    self.clearml_logger.report_scalar(
-                        "Velocity Analysis", "Max Speed (m/s)", max_speed, self.n_calls)
-                # Clear buffer
                 self.velocity_samples = []
             
-            # Print console status
-            print(f"Step {self.n_calls:,} | "
-                  f"Mean Reward: {mean_reward:.2f} | "
-                  f"Best Precision: {self.best_precision*1000:.2f}mm | "
-                  f"LR: {lr:.2e}")
+            print(f"Step {self.n_calls:,} | Reward: {mean_reward:.2f} | Best Dist: {self.best_precision*1000:.2f}mm")
 
     def _save_best_trajectory(self):
-        """Save and visualize best trajectories"""
         if len(self.current_trajectory) > 0:
-            self.best_trajectories.append(self.current_trajectory.copy())
-            
-            # Create trajectory visualization
             try:
+                # 3D Plot
                 fig = plt.figure(figsize=(10, 8))
                 ax = fig.add_subplot(111, projection='3d')
-                
                 traj = np.array(self.current_trajectory)
-                # Plot path
-                ax.plot(traj[:, 0], traj[:, 1], traj[:, 2], 'b-', linewidth=2, label='Path')
-                # Plot End Point
-                ax.scatter(traj[-1, 0], traj[-1, 1], traj[-1, 2], c='r', s=100, label='Final Position')
-                # Plot Start Point
-                ax.scatter(traj[0, 0], traj[0, 1], traj[0, 2], c='g', s=50, label='Start Position')
+                ax.plot(traj[:, 0], traj[:, 1], traj[:, 2], 'b-', linewidth=2)
+                ax.scatter(traj[-1, 0], traj[-1, 1], traj[-1, 2], c='r', s=100)
                 
-                ax.set_xlabel('X (m)')
-                ax.set_ylabel('Y (m)')
-                ax.set_zlabel('Z (m)')
-                ax.set_title(f'Best Trajectory (Final Dist: {self.best_precision*1000:.2f}mm)')
-                ax.legend()
-                
-                # Save and log to ClearML
                 img_path = os.path.join(self.save_path, f'trajectory_{self.n_calls}.png')
                 plt.savefig(img_path)
                 plt.close(fig)
@@ -185,6 +132,21 @@ class AdvancedMonitorCallback(BaseCallback):
                         iteration=self.n_calls,
                         local_path=img_path
                     )
+
+                # Workspace Coverage (2D Scatter) - Fixed usage
+                if self.clearml_logger:
+                    # Convert to list of tuples [(x,y), (x,y)...]
+                    scatter_data = traj[:, :2].tolist() 
+                    self.clearml_logger.report_scatter2d(
+                        title="Workspace Coverage",
+                        series="Best Path (XY)",
+                        iteration=self.n_calls,
+                        scatter=scatter_data,  # This argument was missing before
+                        xaxis="X Position",
+                        yaxis="Y Position",
+                        mode='lines+markers'
+                    )
+
             except Exception as e:
                 print(f"Error plotting trajectory: {e}")
 
