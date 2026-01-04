@@ -58,20 +58,26 @@ class OT2Env(gym.Env):
         self.stagnation_timer = 0 
         self.unlocked_tiers = [False] * len(self.tiers)
         
-        # FIX: The simulation reset returns a dict, not just a list/array
+        # 1. Reset the simulation (returns a dictionary)
         reset_info = self.sim.reset() 
         
-        # Extract the specific position array from the dictionary
-        # If the key is different in your sim_class version, double check sim_class.py
-        pipette_pos = np.array(reset_info['pipette_position'], dtype=np.float32)
+        # 2. Extract the position array from the dict 
+        # In sim_class.py, this is usually under the 'pipette_position' key
+        if isinstance(reset_info, dict) and 'pipette_position' in reset_info:
+            pipette_pos = np.array(reset_info['pipette_position'], dtype=np.float32)
+        else:
+            # Fallback in case your sim_class returns the array directly
+            pipette_pos = np.array(reset_info, dtype=np.float32)
 
-        # SUCCESS PRIMING logic...
+        # 3. SUCCESS PRIMING Logic
         if random.random() < 0.10:
             self.goal_pos = pipette_pos + np.random.uniform(-0.005, 0.005, size=3)
         else:
             self.goal_pos = np.array([0.18, 0.18, 0.10], dtype=np.float32)
 
-        delta = self.goal_pos - pipette_pos # This will now work!
+        # 4. Calculate initial distance
+        delta = self.goal_pos - pipette_pos
         self.prev_dist = np.linalg.norm(delta)
         
+        # Standard Gymnasium return: (observation, info_dict)
         return (delta * 10.0).astype(np.float32), {}
