@@ -14,10 +14,9 @@ class OT2Env(gym.Env):
         self.workspace_low = np.array([-0.1871, -0.1706, 0.1195], dtype=np.float32)
         self.workspace_high = np.array([0.2532, 0.2197, 0.2897], dtype=np.float32)
         
-        # Success Parameters
         self.goal_pos = np.array([0.18, 0.18, 0.10], dtype=np.float32)
-        self.settle_steps = 0
-        self.required_settle = 15 # Harder to "win"
+        self.prev_dist = 0
+        self.withdrawal_timer = 0
         self.steps = 0
 
     def _normalize_pos(self, pos):
@@ -30,64 +29,52 @@ class OT2Env(gym.Env):
     def reset(self, seed=None):
         super().reset(seed=seed)
         self.steps = 0
-        self.settle_steps = 0
+        self.withdrawal_timer = 0
         
         state_dict = self.sim.reset(num_agents=1)
         current_pos = self._extract_pos(state_dict)
+        self.prev_dist = np.linalg.norm(current_pos - self.goal_pos)
         
-        # --- THE "HOOK": SUCCESS PRIMING ---
-        # 5% of the time, spawn the goal RIGHT NEXT to the robot so it gets a "Free Win"
-        if random.random() < 0.05:
-            self.goal_pos = current_pos + np.random.uniform(-0.01, 0.01, size=3)
-        else:
-            self.goal_pos = np.array([0.18, 0.18, 0.10], dtype=np.float32)
-            
         obs = np.concatenate([self._normalize_pos(current_pos), self._normalize_pos(self.goal_pos)])
         return obs.astype(np.float32), {}
 
     def step(self, action):
         self.steps += 1
-        velocity = action * 2.0
-        speed = np.linalg.norm(velocity)
+        # Action is clamped to prevent the 3.6e+12 explosion
+        velocity = np.clip(action, -1.0, 1.0) * 2.0
         
         state_dict = self.sim.run([[float(velocity[0]), float(velocity[1]), float(velocity[2]), 0.0]])
         current_pos = self._extract_pos(state_dict)
         curr_dist = np.linalg.norm(current_pos - self.goal_pos)
         
-        # ========================================================================
-        # THE GACHA REWARD ENGINE (ADDICTION MAXIMUS)
-        # ========================================================================
+        # --- THE ADDICTION ENGINE ---
         reward = 0
-        
-        # 1. THE "SLOT MACHINE" NOISE (Fake Dopamine)
-        # Gives a tiny random reward just for moving, keeps the agent "pulling the lever"
-        if speed > 0.01:
-            reward += random.uniform(0, 0.05) 
+        progress = self.prev_dist - curr_dist
 
-        # 2. THE GRAVITY WELL (The Hunger)
-        # Harsh penalty for being far away. 100mm = -3.1pts, 1mm = -0.3pts
-        reward -= 10.0 * (curr_dist ** 0.5)
-
-        # 3. NEAR-MISS BONUSES (The Tease)
-        # Rewards "almost winning" to keep it trying
-        if 0.005 < curr_dist < 0.015:
-            reward += 0.5 # "So close!"
-
-        # 4. THE 1mm JACKPOT (The Real Win)
-        if curr_dist < 0.001:
-            self.settle_steps += 1
-            # Exponentially increasing dopamine during settling
-            reward += (50.0 * self.settle_steps)
-            reward -= (speed * 20.0) # HEAVY penalty for moving while winning
+        # 1. THE DOPAMINE HIT (Positive Reinforcement)
+        # Give a massive hit for any progress toward the goal
+        if progress > 0.0005:
+            reward += (progress * 5000) 
+            self.withdrawal_timer = 0 # Addiction satisfied
         else:
-            self.settle_steps = 0
+            # 2. WITHDRAWAL SYNDROME (The Penalty)
+            # Penalize for stagnation or moving away. Penalty grows over time!
+            self.withdrawal_timer += 1
+            withdrawal_penalty = 0.5 * (1.1 ** self.withdrawal_timer) 
+            reward -= min(withdrawal_penalty, 50) # Cap penalty to keep brain stable
 
-        # 5. THE ULTIMATE PAYOUT
-        terminated = bool(self.settle_steps >= self.required_settle)
-        if terminated:
-            reward += 10000.0 # THE GRAND PRIZE
+        # 3. THE "WIN" (1mm target)
+        if curr_dist < 0.001:
+            reward += 100 # Sustained hit for being on target
+            terminated = True
+        else:
+            terminated = False
+
+        # 4. SAFETY CLAMP
+        reward = np.clip(reward, -100, 100)
         
-        truncated = self.steps >= 600 # Faster episodes for more "rounds" of gambling
+        self.prev_dist = curr_dist
+        truncated = self.steps >= 1000
         
         obs = np.concatenate([self._normalize_pos(current_pos), self._normalize_pos(self.goal_pos)])
         return obs.astype(np.float32), float(reward), terminated, truncated, {'dist_mm': curr_dist * 1000}
