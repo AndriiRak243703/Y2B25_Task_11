@@ -7,7 +7,18 @@ import os
 import math
 import pybullet_data
 import time
+import matplotlib
+# Set non-interactive backend for headless docker environments
+matplotlib.use('Agg') 
+import matplotlib.pyplot as plt
+from clearml import Task, Logger
+from stable_baselines3 import PPO
+from stable_baselines3.common.callbacks import BaseCallback
+from stable_baselines3.common.vec_env import DummyVecEnv
 
+# ==============================================================================
+# 1. SIMULATION MANAGER (Optimized for FPS)
+# ==============================================================================
 class Simulation:
     """PyBullet simulation manager for OT-2 robot"""
     def __init__(self, num_agents, render=True, rgb_array=False):
@@ -19,109 +30,62 @@ class Simulation:
         p.setAdditionalSearchPath(pybullet_data.getDataPath())
         p.setGravity(0, 0, -10)
         
-        # Setup workspace visualization
-        texture_list = [f for f in os.listdir("textures") if f.endswith('.png')]
-        random_texture = random.choice(texture_list) if texture_list else "default.png"
-        self.textureId = p.loadTexture(f"textures/{random_texture}") if os.path.exists(f"textures/{random_texture}") else -1
+        # Workspace visualization setup
+        self.textureId = -1
+        if os.path.exists("textures"):
+            texture_list = [f for f in os.listdir("textures") if f.endswith('.png')]
+            if texture_list:
+                random_texture = random.choice(texture_list)
+                self.textureId = p.loadTexture(f"textures/{random_texture}")
         
         # Camera setup
         cameraDistance = 1.1 * (math.ceil((num_agents) ** 0.3))
-        cameraYaw = 90
-        cameraPitch = -35
-        cameraTargetPosition = [-0.2, -(math.ceil(num_agents ** 0.5) / 2) + 0.5, 0.1]
-        p.resetDebugVisualizerCamera(cameraDistance, cameraYaw, cameraPitch, cameraTargetPosition)
+        p.resetDebugVisualizerCamera(cameraDistance, 90, -35, [-0.2, 0.5, 0.1])
         
         self.baseplaneId = p.loadURDF("plane.urdf")
         self.pipette_offset = [0.073, 0.0895, 0.0895]
-        self.pipette_positions = {}
+        self.robotIds = []
+        self.specimenIds = []
         self.sphereIds = []
-        self.droplet_positions = {}
         self.current_frame = None
         self.create_robots(num_agents)
 
     def create_robots(self, num_agents):
         spacing = 1
         grid_size = math.ceil(num_agents ** 0.5)
-        self.robotIds = []
-        self.specimenIds = []
         agent_count = 0
 
         for i in range(grid_size):
             for j in range(grid_size):
-                if agent_count >= num_agents:
-                    break
-                    
+                if agent_count >= num_agents: break
                 position = [-spacing * i, -spacing * j, 0.03]
-                robotId = p.loadURDF("ot_2_simulation_v6.urdf", position, [0, 0, 0, 1],
-                                   flags=p.URDF_USE_INERTIA_FROM_FILE)
+                robotId = p.loadURDF("ot_2_simulation_v6.urdf", position, [0, 0, 0, 1], flags=p.URDF_USE_INERTIA_FROM_FILE)
                 
-                start_position, start_orientation = p.getBasePositionAndOrientation(robotId)
-                p.createConstraint(parentBodyUniqueId=robotId,
-                                 parentLinkIndex=-1,
-                                 childBodyUniqueId=-1,
-                                 childLinkIndex=-1,
-                                 jointType=p.JOINT_FIXED,
-                                 jointAxis=[0, 0, 0],
-                                 parentFramePosition=[0, 0, 0],
-                                 childFramePosition=start_position,
-                                 childFrameOrientation=start_orientation)
-
-                # Create specimen with texture
+                # Specimen setup
                 offset = [0.18275-0.00005, 0.163-0.026, 0.057]
-                position_with_offset = [position[0] + offset[0], position[1] + offset[1], position[2] + offset[2]]
-                rotate_90 = p.getQuaternionFromEuler([0, 0, -math.pi/2])
-                planeId = p.loadURDF("custom.urdf", position_with_offset, rotate_90)
+                spec_pos = [position[0] + offset[0], position[1] + offset[1], position[2] + offset[2]]
+                planeId = p.loadURDF("custom.urdf", spec_pos, p.getQuaternionFromEuler([0, 0, -math.pi/2]))
                 p.setCollisionFilterPair(robotId, planeId, -1, -1, enableCollision=0)
-                spec_position, spec_orientation = p.getBasePositionAndOrientation(planeId)
-                
-                p.createConstraint(parentBodyUniqueId=planeId,
-                                 parentLinkIndex=-1,
-                                 childBodyUniqueId=-1,
-                                 childLinkIndex=-1,
-                                 jointType=p.JOINT_FIXED,
-                                 jointAxis=[0, 0, 0],
-                                 parentFramePosition=[0, 0, 0],
-                                 childFramePosition=spec_position,
-                                 childFrameOrientation=spec_orientation)
                 
                 if self.textureId >= 0:
                     p.changeVisualShape(planeId, -1, textureUniqueId=self.textureId)
 
                 self.robotIds.append(robotId)
                 self.specimenIds.append(planeId)
-                self.pipette_positions[f'robotId_{robotId}'] = self.get_pipette_position(robotId)
                 agent_count += 1
 
     def get_pipette_position(self, robotId):
-        robot_position = p.getBasePositionAndOrientation(robotId)[0]
+        robot_pos, _ = p.getBasePositionAndOrientation(robotId)
         joint_states = p.getJointStates(robotId, [0, 1, 2])
-        robot_position = list(robot_position)
-        robot_position[0] -= joint_states[0][0]
-        robot_position[1] -= joint_states[1][0]
-        robot_position[2] += joint_states[2][0]
-        
-        return [
-            robot_position[0] + self.pipette_offset[0],
-            robot_position[1] + self.pipette_offset[1],
-            robot_position[2] + self.pipette_offset[2]
-        ]
+        x = robot_pos[0] - joint_states[0][0] + self.pipette_offset[0]
+        y = robot_pos[1] - joint_states[1][0] + self.pipette_offset[1]
+        z = robot_pos[2] + joint_states[2][0] + self.pipette_offset[2]
+        return [x, y, z]
 
     def reset(self, num_agents=1):
-        # Cleanup existing objects
-        for robotId in self.robotIds:
-            p.removeBody(robotId)
-        for specimenId in self.specimenIds:
-            p.removeBody(specimenId)
-        for sphereId in self.sphereIds:
-            p.removeBody(sphereId)
-            
-        # Reset tracking structures
-        self.pipette_positions = {}
-        self.sphereIds = []
-        self.droplet_positions = {}
-        self.current_frame = None
-        
-        # Recreate environment
+        for rId in self.robotIds: p.removeBody(rId)
+        for sId in self.specimenIds: p.removeBody(sId)
+        self.robotIds, self.specimenIds = [], []
         self.create_robots(num_agents)
         return self.get_states()
 
@@ -130,309 +94,196 @@ class Simulation:
             self.apply_actions(actions)
             p.stepSimulation()
             
-            # Contact handling
-            for specimenId, robotId in zip(self.specimenIds, self.robotIds):
-                self.check_contact(robotId, specimenId)
-            
-            # RGB capture if needed
-            if self.rgb_array:
-                width, height, rgbImg, _, _ = p.getCameraImage(
-                    width=320, height=240,
-                    viewMatrix=p.computeViewMatrix([1, 0, 1], [-0.3, 0, 0], [0, 0, 1]),
-                    projectionMatrix=p.computeProjectionMatrixFOV(50, 320/240, 0.1, 100.0)
-                )
-                self.current_frame = rgbImg
-            
-            if self.render:
+            # FPS Optimization: No sleep during DIRECT training
+            if self.render and not self.rgb_array:
                 time.sleep(1./240.)
+            
+            # Heavy RGB capture only if needed
+            if self.rgb_array and _ == num_steps - 1:
+                _, _, rgbImg, _, _ = p.getCameraImage(320, 240)
+                self.current_frame = rgbImg
                 
         return self.get_states()
 
     def apply_actions(self, actions):
         for i, robotId in enumerate(self.robotIds):
-            p.setJointMotorControl2(robotId, 0, p.VELOCITY_CONTROL, 
-                                  targetVelocity=-actions[i][0], force=500)
-            p.setJointMotorControl2(robotId, 1, p.VELOCITY_CONTROL, 
-                                  targetVelocity=-actions[i][1], force=500)
-            p.setJointMotorControl2(robotId, 2, p.VELOCITY_CONTROL, 
-                                  targetVelocity=actions[i][2], force=800)
+            p.setJointMotorControl2(robotId, 0, p.VELOCITY_CONTROL, targetVelocity=-actions[i][0], force=500)
+            p.setJointMotorControl2(robotId, 1, p.VELOCITY_CONTROL, targetVelocity=-actions[i][1], force=500)
+            p.setJointMotorControl2(robotId, 2, p.VELOCITY_CONTROL, targetVelocity=actions[i][2], force=800)
 
     def get_states(self):
         states = {}
         for robotId in self.robotIds:
-            joint_states = p.getJointStates(robotId, [0, 1, 2])
-            robot_position = p.getBasePositionAndOrientation(robotId)[0]
-            robot_position = list(robot_position)
-            robot_position[0] -= joint_states[0][0]
-            robot_position[1] -= joint_states[1][0]
-            robot_position[2] += joint_states[2][0]
-            
-            pipette_position = [
-                robot_position[0] + self.pipette_offset[0],
-                robot_position[1] + self.pipette_offset[1],
-                robot_position[2] + self.pipette_offset[2]
-            ]
-            
-            states[f'robotId_{robotId}'] = {
-                "joint_states": {
-                    f'joint_{i}': {
-                        'position': joint_states[i][0],
-                        'velocity': joint_states[i][1]
-                    } for i in range(3)
-                },
-                "robot_position": robot_position,
-                "pipette_position": [round(coord, 4) for coord in pipette_position]
-            }
+            states[f'robotId_{robotId}'] = {"pipette_position": self.get_pipette_position(robotId)}
         return states
 
-    def check_contact(self, robotId, specimenId):
-        for sphereId in self.sphereIds.copy():
-            if not p.isConnected():
-                return
-                
-            contact_points = p.getContactPoints(sphereId, specimenId)
-            if contact_points:
-                sphere_pos, sphere_orient = p.getBasePositionAndOrientation(sphereId)
-                p.setCollisionFilterPair(sphereId, specimenId, -1, -1, enableCollision=0)
-                p.createConstraint(sphereId, -1, -1, -1, p.JOINT_FIXED, [0,0,0],
-                                  [0,0,0], sphere_pos, sphere_orient)
-                
-                key = f'specimenId_{specimenId}'
-                if key not in self.droplet_positions:
-                    self.droplet_positions[key] = []
-                self.droplet_positions[key].append(sphere_pos)
-                
-                if sphereId in self.sphereIds:
-                    self.sphereIds.remove(sphereId)
-            
-            # Cleanup spheres in contact with robot
-            robot_contacts = p.getContactPoints(sphereId, robotId)
-            if robot_contacts and sphereId in self.sphereIds:
-                p.removeBody(sphereId)
-                self.sphereIds.remove(sphereId)
-
     def close(self):
-        if p.isConnected():
-            p.disconnect()
+        if p.isConnected(): p.disconnect()
 
-
+# ==============================================================================
+# 2. GYM ENVIRONMENT (Metric & Reward Fixed)
+# ==============================================================================
 class OT2Env(gym.Env):
-    """Gym environment for OT-2 robot with velocity-aware control"""
-    metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 240}
-
     def __init__(self, render=False):
         super().__init__()
         self.render_mode = "human" if render else "rgb_array"
         self.sim = Simulation(num_agents=1, render=render, rgb_array=(self.render_mode == "rgb_array"))
-        
-        # Action space: normalized velocities [-1, 1] for x,y,z axes
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(3,), dtype=np.float32)
+        self.observation_space = spaces.Box(low=-1.0, high=1.0, shape=(10,), dtype=np.float32)
         
-        # Enhanced observation space with velocity awareness
-        self.observation_space = spaces.Box(
-            low=-1.0, 
-            high=1.0, 
-            shape=(10,),  # [pos(3), goal(3), velocity(3), distance(1)]
-            dtype=np.float32
-        )
-        
-        # Workspace boundaries (in meters)
         self.workspace_low = np.array([-0.1871, -0.1706, 0.1195], dtype=np.float32)
         self.workspace_high = np.array([0.2532, 0.2197, 0.2897], dtype=np.float32)
-        
-        # Robot parameters
         self.base_position = np.array([0.0, 0.0, 0.03], dtype=np.float32)
         self.pipette_offset = np.array([0.073, 0.0895, 0.0895], dtype=np.float32)
-        self.joint_limits = [(-0.25, 0.25), (-0.25, 0.25), (0.0, 0.17)]
         
-        # State tracking
-        self.prev_position = None
-        self.current_velocity = np.zeros(3)
-        self.max_steps = 1000
-        self.steps = 0
         self.goal_pos = np.zeros(3)
+        self.steps = 0
+        self.max_steps = 1000
         self.prev_dist = 0.0
+        self.prev_position = None
 
     def _normalize_pos(self, pos):
-        """Normalize position to [-1, 1] range based on workspace limits"""
         return 2.0 * (pos - self.workspace_low) / (self.workspace_high - self.workspace_low) - 1.0
-
-    def _normalize_velocity(self, velocity):
-        """Normalize velocity to [-1, 1] range (max expected velocity: 0.1 m/s)"""
-        max_vel = 0.1
-        return np.clip(velocity / max_vel, -1.0, 1.0)
-
-    def _compute_velocity(self, current_pos, dt=1/240.0):
-        """Compute velocity based on position change"""
-        if self.prev_position is None:
-            self.prev_position = current_pos.copy()
-            return np.zeros(3)
-        
-        velocity = (current_pos - self.prev_position) / dt
-        self.prev_position = current_pos.copy()
-        return velocity
-
-    def _validate_position(self, pos):
-        """Ensure position stays within workspace boundaries"""
-        return np.clip(pos, self.workspace_low, self.workspace_high)
-
-    def _compute_joint_positions(self, target_pos):
-        """Calculate joint positions to reach target pipette position"""
-        return np.array([
-            self.base_position[0] + self.pipette_offset[0] - target_pos[0],
-            self.base_position[1] + self.pipette_offset[1] - target_pos[1],
-            target_pos[2] - self.base_position[2] - self.pipette_offset[2]
-        ], dtype=np.float32)
-
-    def _validate_joint_limits(self, joints):
-        """Enforce joint limits to prevent simulation instability"""
-        return np.array([
-            np.clip(joints[0], *self.joint_limits[0]),
-            np.clip(joints[1], *self.joint_limits[1]),
-            np.clip(joints[2], *self.joint_limits[2])
-        ], dtype=np.float32)
-
-    def _create_observation(self, current_pos):
-        """Create observation with position, goal, velocity, and distance"""
-        distance = np.linalg.norm(current_pos - self.goal_pos)
-        max_workspace_dist = np.linalg.norm(self.workspace_high - self.workspace_low)
-        distance_normalized = distance / max_workspace_dist
-        
-        return np.concatenate([
-            self._normalize_pos(current_pos),
-            self._normalize_pos(self.goal_pos),
-            self._normalize_velocity(self.current_velocity),
-            np.array([distance_normalized * 2 - 1])  # Scale to [-1, 1]
-        ]).astype(np.float32)
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         self.steps = 0
         self.prev_position = None
-        self.current_velocity = np.zeros(3)
+        self.goal_pos = np.clip(self.np_random.uniform(self.workspace_low, self.workspace_high), self.workspace_low, self.workspace_high)
         
-        # Randomize goal position within workspace
-        self.goal_pos = self._validate_position(self.np_random.uniform(
-            self.workspace_low, 
-            self.workspace_high
-        ))
-        
-        # Reset simulation
         state_dict = self.sim.reset(num_agents=1)
         robot_id = self.sim.robotIds[0]
         
-        # Randomize starting position with validation
-        for _ in range(10):
-            start_pos = self._validate_position(self.np_random.uniform(
-                self.workspace_low, 
-                self.workspace_high
-            ))
-            joints = self._compute_joint_positions(start_pos)
-            valid_joints = self._validate_joint_limits(joints)
-            
-            # Verify achievable position
-            achieved_pos = np.array([
-                self.base_position[0] + self.pipette_offset[0] - valid_joints[0],
-                self.base_position[1] + self.pipette_offset[1] - valid_joints[1],
-                self.base_position[2] + self.pipette_offset[2] + valid_joints[2]
-            ])
-            
-            if np.all(achieved_pos >= self.workspace_low) and np.all(achieved_pos <= self.workspace_high):
-                break
+        # Get start position
+        curr_pos = np.array(state_dict[f'robotId_{robot_id}']['pipette_position'], dtype=np.float32)
+        self.prev_dist = np.linalg.norm(curr_pos - self.goal_pos)
+        self.prev_position = curr_pos.copy()
         
-        # Apply joint positions
-        for joint_idx, joint_val in enumerate(valid_joints):
-            p.resetJointState(robot_id, joint_idx, targetValue=float(joint_val))
+        return self._create_obs(curr_pos), {"goal": self.goal_pos}
+
+    def _create_obs(self, pos):
+        dist = np.linalg.norm(pos - self.goal_pos)
+        norm_dist = np.clip(dist / np.linalg.norm(self.workspace_high - self.workspace_low), 0, 1)
+        velocity = (pos - self.prev_position) * 240.0 if self.prev_position is not None else np.zeros(3)
+        self.prev_position = pos.copy()
         
-        # Get initial state
-        state_dict = self.sim.get_states()
-        current_pos = np.array(state_dict[f'robotId_{robot_id}']['pipette_position'], dtype=np.float32)
-        self.prev_dist = np.linalg.norm(current_pos - self.goal_pos)
-        self.prev_position = current_pos.copy()
-        
-        return self._create_observation(current_pos), {
-            "start_pos": start_pos, 
-            "goal_pos": self.goal_pos,
-            "robot_id": robot_id
-        }
+        return np.concatenate([
+            self._normalize_pos(pos),
+            self._normalize_pos(self.goal_pos),
+            np.clip(velocity / 0.1, -1, 1),
+            [norm_dist * 2 - 1]
+        ]).astype(np.float32)
 
     def step(self, action):
         self.steps += 1
+        # Adaptive velocity scaling
+        dist_to_goal = self.prev_dist
+        max_vel = 0.08 * min(1.0, max(0.05, dist_to_goal / 0.05))
+        velocity = np.clip(action, -1.0, 1.0) * max_vel
         
-        # Adaptive velocity control based on distance to goal
+        self.sim.run([[float(velocity[0]), float(velocity[1]), float(velocity[2])]])
+        
         state_dict = self.sim.get_states()
-        robot_id = next(iter(state_dict))
-        current_pos = np.array(state_dict[robot_id]['pipette_position'], dtype=np.float32)
-        distance_to_goal = np.linalg.norm(current_pos - self.goal_pos)
+        new_pos = np.array(state_dict[next(iter(state_dict))]['pipette_position'], dtype=np.float32)
+        curr_dist = np.linalg.norm(new_pos - self.goal_pos)
         
-        # Scale max velocity based on proximity to target
-        max_velocity = 0.05 * min(1.0, max(0.1, distance_to_goal / 0.05))
-        velocity = np.clip(action, -1.0, 1.0) * max_velocity
+        # Reward Shaping
+        reward = (self.prev_dist - curr_dist) * 2000.0
+        reward -= 0.01 # Time penalty
         
-        # Execute action
-        self.sim.run([[float(velocity[0]), float(velocity[1]), float(velocity[2]), 0.0]])
-        
-        # Update state
-        state_dict = self.sim.get_states()
-        current_pos = np.array(state_dict[robot_id]['pipette_position'], dtype=np.float32)
-        self.current_velocity = self._compute_velocity(current_pos)
-        curr_dist = np.linalg.norm(current_pos - self.goal_pos)
-        
-        # Reward calculation
-        progress = self.prev_dist - curr_dist
-        reward = progress * 2000.0  # High weight for progress
-        
-        # Velocity penalties and bonuses
-        speed = np.linalg.norm(self.current_velocity)
-        
-        # Strong penalty for high speed when close to target
-        if curr_dist < 0.01:  # Within 1cm
-            velocity_penalty = (speed / 0.01) ** 2 * 4.0
-            reward -= velocity_penalty
-        
-        # Smooth approach bonus
-        if curr_dist < 0.02 and speed < 0.005:  # Within 2cm and slow
-            reward += 1.0 - (speed / 0.005)
-        
-        # Terminal conditions
         terminated = False
-        if curr_dist < 0.001:  # 1mm precision
-            stopping_bonus = max(0.0, 10.0 - speed * 1000)  # Bonus for stopping
-            reward += 100.0 + stopping_bonus
-            if self.steps > self.max_steps * 0.7:
-                reward += 20.0  # Stability bonus
+        if curr_dist < 0.001: # Success
+            reward += 100.0
             terminated = True
         
-        # Instability penalty
-        if np.any(np.abs(self.current_velocity) > 0.5):
-            reward -= 50.0
-            terminated = True
-        
-        # Time penalty
-        reward -= 0.01
-        
-        # Update tracking
         self.prev_dist = curr_dist
         truncated = self.steps >= self.max_steps
         
-        # Return step results
-        return (
-            self._create_observation(current_pos),
-            float(reward),
-            terminated,
-            truncated,
-            {
-                'distance': curr_dist,
-                'velocity': speed,
-                'position': current_pos.copy(),
-                'progress': progress
-            }
-        )
+        return self._create_obs(new_pos), float(reward), terminated, truncated, {
+            'distance': float(curr_dist),
+            'position': new_pos.copy()
+        }
 
-    def render(self):
-        if self.render_mode == "rgb_array" and hasattr(self.sim, 'current_frame'):
-            return self.sim.current_frame
-        return None
+# ==============================================================================
+# 3. ADVANCED MONITOR CALLBACK (Metric Visibility Fixed)
+# ==============================================================================
+class AdvancedMonitorCallback(BaseCallback):
+    def __init__(self, check_freq=5000, checkpoint_freq=100000, save_path='./models', verbose=1):
+        super().__init__(verbose)
+        self.check_freq = check_freq
+        self.checkpoint_freq = checkpoint_freq
+        self.save_path = save_path
+        self.best_precision = np.inf
+        self.precision_buffer = []
+        self.success_buffer = []
+        self.current_trajectory = []
+        os.makedirs(save_path, exist_ok=True)
 
-    def close(self):
-        self.sim.close()
+    def _init_callback(self) -> None:
+        self.clearml_logger = Logger.current_logger()
+
+    def _on_step(self) -> bool:
+        info = self.locals['infos'][0]
+        
+        # CAPTURE METRICS IMMEDIATELY ON EPISODE END
+        if self.locals['dones'][0]:
+            dist_mm = info.get('distance', 1.0) * 1000
+            self.precision_buffer.append(dist_mm)
+            self.success_buffer.append(1 if dist_mm <= 1.0 else 0)
+            
+            if dist_mm < self.best_precision * 1000:
+                self.best_precision = info.get('distance')
+                if self.best_precision < 0.001: self._save_traj()
+            
+            if len(self.precision_buffer) > 100:
+                self.precision_buffer.pop(0)
+                self.success_buffer.pop(0)
+            self.current_trajectory = []
+
+        if 'position' in info:
+            self.current_trajectory.append(info['position'].copy())
+
+        if self.n_calls % self.check_freq == 0:
+            avg_p = np.mean(self.precision_buffer) if self.precision_buffer else 0
+            sr = np.mean(self.success_buffer) * 100 if self.success_buffer else 0
+            if self.clearml_logger:
+                self.clearml_logger.report_scalar("Precision Tracker", "Avg Dist (mm)", avg_p, self.n_calls)
+                self.clearml_logger.report_scalar("Precision Tracker", "Success Rate (%)", sr, self.n_calls)
+                self.clearml_logger.report_scalar("Precision Tracker", "Best (mm)", self.best_precision * 1000, self.n_calls)
+            print(f"Step {self.n_calls:,} | SR: {sr:.1f}% | Avg: {avg_p:.2f}mm | Best: {self.best_precision*1000:.2f}mm")
+
+        if self.n_calls % self.checkpoint_freq == 0:
+            self.model.save(os.path.join(self.save_path, f"chk_{self.n_calls}.zip"))
+            
+        return True
+
+    def _save_traj(self):
+        if not self.current_trajectory: return
+        try:
+            traj = np.array(self.current_trajectory)
+            fig = plt.figure(); ax = fig.add_subplot(111, projection='3d')
+            ax.plot(traj[:,0], traj[:,1], traj[:,2], 'b-'); ax.scatter(traj[-1,0], traj[-1,1], traj[-1,2], c='r')
+            path = os.path.join(self.save_path, f"traj_{self.n_calls}.png")
+            plt.savefig(path); plt.close()
+            if self.clearml_logger: self.clearml_logger.report_image("Best", "3D Plot", self.n_calls, path)
+        except: pass
+
+# ==============================================================================
+# 4. MAIN EXECUTION
+# ==============================================================================
+def main():
+    task = Task.init(project_name='Mentor Group - Myrthe/Group 1', task_name='hris_Precision_Training_v3', task_type=Task.TaskTypes.training)
+    task.set_repo(repo='https://github.com/AndriiRak243703/Y2B25_Task_11.git', branch='hris/rl-training')
+    task.set_base_docker('deanis/2023y2b-rl:latest')
+    task.set_packages(['tensorboard', 'clearml', 'gymnasium', 'stable-baselines3==2.2.1', 'pybullet==3.2.5', 'matplotlib'])
+    task.execute_remotely(queue_name='default', exit_process=True)
+    
+    env = DummyVecEnv([lambda: OT2Env(render=False)])
+    model = PPO("MlpPolicy", env, learning_rate=2.5e-4, n_steps=2048, batch_size=64, n_epochs=10, gamma=0.998, verbose=1, tensorboard_log="./ppo_logs/")
+    
+    callback = AdvancedMonitorCallback(check_freq=5000)
+    model.learn(total_timesteps=5_000_000, callback=callback, progress_bar=True)
+    model.save("final_model"); task.upload_artifact("final_model", "final_model.zip")
+
+if __name__ == "__main__":
+    main()
