@@ -5,9 +5,6 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback
 from hris_ot2_gym_wrapper import OT2Env
 
-# ============================================================================
-# CUSTOM CALLBACK
-# ============================================================================
 class MaximusCallback(BaseCallback):
     def __init__(self, log_freq=1024):
         super().__init__()
@@ -19,42 +16,39 @@ class MaximusCallback(BaseCallback):
         if self.n_calls % self.log_freq == 0:
             obs = self.locals['new_obs'][0]
             dist_mm = (np.linalg.norm(obs) / 10.0) * 1000
-            if dist_mm < 1.0: status = " PERFECT"
-            elif dist_mm < 3.0: status = " JACKPOT"
-            elif dist_mm < 12.0: status = " BREAKING"
-            else: status = "HOT"
+            if dist_mm < 1.0: status = "💎 PERFECT"
+            elif dist_mm < 3.0: status = "💰 JACKPOT"
+            elif dist_mm < 12.0: status = "⚡ BREAKING"
+            else: status = "🔥 HOT"
             print(f"{self.num_timesteps:<10} | {dist_mm:>10.2f} mm | {status}")
         return True
 
-# ============================================================================
-# MAIN
-# ============================================================================
 def main():
     PERSON_NAME = "hris"
     
-    # --- 1. THE CRITICAL REUSE FIX ---
-    # reuse_last_task_id=False prevents ClearML from overwriting your broken run
+    # Initialize Task with REUSE=FALSE to clear old Docker errors
     task = Task.init(
         project_name='Mentor Group - Jason/Group 1', 
         task_name=f'{PERSON_NAME}_Addiction_Maximus_FINAL',
-        reuse_last_task_id=False # <--- ADD THIS LINE
+        reuse_last_task_id=False
     )
 
-    # --- 2. EXPLICIT REMOTE CONFIG ---
+    # Explicitly set the Git repository connection
     task.set_repo(
         repo='https://github.com/AndriiRak243703/Y2B25_Task_11.git',
         branch='hris/rl-training'
     )
 
-    # This image name MUST be exactly this (no commas!)
+    # Set the correct Docker image for the remote worker
     task.set_base_docker('deanis/2023y2b-rl:latest')
     
+    # Ensure remote worker installs all logic
     task.set_packages(['tensorboard', 'clearml', 'gymnasium', 'stable-baselines3', 'pybullet'])
 
-    # Enqueue to the GPU cluster
+    # Enqueue to the remote cluster
     task.execute_remotely(queue_name='default')
 
-    # --- 3. TRAINING LOGIC ---
+    # Environment and Model
     env = OT2Env(render=False)
     
     model = PPO(
@@ -66,15 +60,17 @@ def main():
         n_steps=1024,
         batch_size=64,
         clip_range=0.1,
-        verbose=1
+        verbose=1,
+        tensorboard_log=f"runs/{PERSON_NAME}"
     )
 
     print(f"--- DEPLOYING {PERSON_NAME.upper()} ADDICTION MAXIMUS ---")
     try:
         model.learn(total_timesteps=2000000, callback=MaximusCallback())
-        model.save(f"ot2_maximus_final")
+        model.save("ot2_maximus_final")
+        task.upload_artifact("model", artifact_object="ot2_maximus_final.zip")
     except KeyboardInterrupt:
-        model.save(f"ot2_maximus_interrupted")
+        model.save("ot2_maximus_interrupted")
 
 if __name__ == "__main__":
     main()
