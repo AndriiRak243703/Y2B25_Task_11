@@ -12,71 +12,72 @@ from hris_ot2_gym_wrapper import OT2Env
 
 class AdvancedMonitorCallback(BaseCallback):
     """
-    Comprehensive monitoring with visualization, early stopping, 
-    and ClearML integration.
+    Comprehensive monitoring with periodic check-pointing, 
+    visualization, and relaxed early stopping.
     """
-    def __init__(self, check_freq=1000, save_path='./models', verbose=1):
+    def __init__(self, check_freq=1000, checkpoint_freq=100000, save_path='./models', verbose=1):
         super().__init__(verbose)
         self.check_freq = check_freq
+        self.checkpoint_freq = checkpoint_freq
         self.save_path = save_path
         self.best_mean_reward = -np.inf
-        self.best_precision = np.inf
+        self.best_precision = np.inf  
         self.last_improvement = 0
-        self.max_no_improvement = 50_000
+        # Increased to 500k to allow for long-term refinement
+        self.max_no_improvement = 500_000  
         
-        # Data buffers
         self.current_trajectory = []
-        self.velocity_samples = []
-        self.best_trajectories = []
-        
+        self.velocity_samples = []  
         os.makedirs(save_path, exist_ok=True)
 
     def _init_callback(self) -> None:
-        # Just initialize the logger, do not try to pre-plot empty graphs
         self.clearml_logger = Logger.current_logger()
 
     def _on_step(self) -> bool:
-        # 1. Capture Info
         info = self.locals['infos'][0]
         
-        # 2. Trajectory Tracking
+        # Track data for logging
         if 'position' in info:
-            pos = info['position']
-            self.current_trajectory.append(pos.copy())
-            
-        # 3. Velocity Tracking
+            self.current_trajectory.append(info['position'].copy())
         if 'velocity' in info:
             self.velocity_samples.append(info['velocity'])
 
-        # 4. Periodic evaluation
+        # 1. Periodic Evaluation & Logging
         if self.n_calls % self.check_freq == 0:
             self._evaluate_and_log()
+            
+        # 2. Periodic Checkpointing (Every 100k steps)
+        if self.n_calls % self.checkpoint_freq == 0:
+            chk_name = f"checkpoint_{self.n_calls}"
+            path = os.path.join(self.save_path, f"{chk_name}.zip")
+            self.model.save(path)
+            if Task.current_task():
+                Task.current_task().upload_artifact(name=chk_name, artifact_object=path)
+            if self.verbose > 0:
+                print(f"💾 Saved checkpoint at step {self.n_calls}")
         
-        # 5. Early stopping check
+        # 3. Early stopping check (relaxed)
         if self.n_calls - self.last_improvement > self.max_no_improvement:
             if self.verbose > 0:
-                print(f"🛑 Stopping early after {self.n_calls} steps with no improvement")
-            return False
+                print(f"🛑 Stopping early: No improvement in {self.max_no_improvement} steps")
+            return False  
         
         return True
 
     def _on_rollout_end(self) -> None:
         if self.locals['dones'][0]: 
             info = self.locals['infos'][0]
+            dist = info.get('distance', 1.0)
             
-            distance = info.get('distance', 0.0)
-            velocity = info.get('velocity', 0.0)
-            
+            # Log precision to ClearML
             if self.clearml_logger:
-                self.clearml_logger.report_scalar(
-                    "Precision Metrics", "Final Distance (mm)", distance * 1000, self.n_calls)
-                self.clearml_logger.report_scalar(
-                    "Velocity Control", "Final Speed (mm/s)", velocity * 1000, self.n_calls)
+                self.clearml_logger.report_scalar("Precision", "Dist (mm)", dist * 1000, self.n_calls)
             
-            if distance < self.best_precision:
-                self.best_precision = distance
-                self.last_improvement = self.n_calls
-                if distance < 0.001: 
+            # Record best precision ever seen
+            if dist < self.best_precision:
+                self.best_precision = dist
+                self.last_improvement = self.n_calls # Reset improvement clock
+                if dist < 0.001: # Sub-millimeter
                     self._save_best_trajectory()
             
             self.current_trajectory = []
@@ -85,70 +86,34 @@ class AdvancedMonitorCallback(BaseCallback):
         episode_rewards = self.model.ep_info_buffer or []
         if episode_rewards and len(episode_rewards) > 0:
             mean_reward = np.mean([ep['r'] for ep in episode_rewards])
-            mean_length = np.mean([ep['l'] for ep in episode_rewards])
             
+            # Update best model based on reward
             if mean_reward > self.best_mean_reward:
                 self.best_mean_reward = mean_reward
+                self.last_improvement = self.n_calls
                 self.model.save(os.path.join(self.save_path, "best_model"))
-                if Task.current_task():
-                    Task.current_task().upload_artifact(
-                        name=f"best_model_step_{self.n_calls}", 
-                        artifact_object=os.path.join(self.save_path, "best_model.zip")
-                    )
             
             if self.clearml_logger:
-                self.clearml_logger.report_scalar(
-                    "Training", "Mean Reward", mean_reward, self.n_calls)
-                self.clearml_logger.report_scalar(
-                    "Training", "Episode Length", mean_length, self.n_calls)
+                self.clearml_logger.report_scalar("Training", "Mean Reward", mean_reward, self.n_calls)
             
-            if len(self.velocity_samples) > 0:
-                avg_speed = np.mean(self.velocity_samples)
-                if self.clearml_logger:
-                    self.clearml_logger.report_scalar(
-                        "Velocity Analysis", "Average Speed (m/s)", avg_speed, self.n_calls)
-                self.velocity_samples = []
-            
-            print(f"Step {self.n_calls:,} | Reward: {mean_reward:.2f} | Best Dist: {self.best_precision*1000:.2f}mm")
+            # Print status to console
+            print(f"Step {self.n_calls:,} | Reward: {mean_reward:.2f} | Best Precision: {self.best_precision*1000:.2f}mm")
 
     def _save_best_trajectory(self):
         if len(self.current_trajectory) > 0:
             try:
-                # 3D Plot
+                traj = np.array(self.current_trajectory)
                 fig = plt.figure(figsize=(10, 8))
                 ax = fig.add_subplot(111, projection='3d')
-                traj = np.array(self.current_trajectory)
-                ax.plot(traj[:, 0], traj[:, 1], traj[:, 2], 'b-', linewidth=2)
+                ax.plot(traj[:, 0], traj[:, 1], traj[:, 2], 'b-')
                 ax.scatter(traj[-1, 0], traj[-1, 1], traj[-1, 2], c='r', s=100)
-                
-                img_path = os.path.join(self.save_path, f'trajectory_{self.n_calls}.png')
+                img_path = os.path.join(self.save_path, f'best_traj_{self.n_calls}.png')
                 plt.savefig(img_path)
                 plt.close(fig)
-                
                 if self.clearml_logger:
-                    self.clearml_logger.report_image(
-                        title="Best Trajectories", 
-                        series="3D Plot", 
-                        iteration=self.n_calls,
-                        local_path=img_path
-                    )
-
-                # Workspace Coverage (2D Scatter) - Fixed usage
-                if self.clearml_logger:
-                    # Convert to list of tuples [(x,y), (x,y)...]
-                    scatter_data = traj[:, :2].tolist() 
-                    self.clearml_logger.report_scatter2d(
-                        title="Workspace Coverage",
-                        series="Best Path (XY)",
-                        iteration=self.n_calls,
-                        scatter=scatter_data,  # This argument was missing before
-                        xaxis="X Position",
-                        yaxis="Y Position",
-                        mode='lines+markers'
-                    )
-
+                    self.clearml_logger.report_image("Best Trajectories", "3D Plot", self.n_calls, img_path)
             except Exception as e:
-                print(f"Error plotting trajectory: {e}")
+                print(f"Plotting failed: {e}")
 
 def main():
     # 1. Initialize ClearML task
