@@ -8,7 +8,7 @@ class OT2Env(gym.Env):
     def __init__(self, render=False):
         super().__init__()
         # Ensure we use the provided sim_class.py as per task requirements
-        self.sim = Simulation(render=render) # CITED:
+        self.sim = Simulation(num_agents=1, render=render) # CITED:
         
         # Action space: x, y, z movements
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(3,), dtype=np.float32)
