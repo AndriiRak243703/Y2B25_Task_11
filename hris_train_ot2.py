@@ -19,10 +19,10 @@ class MaximusCallback(BaseCallback):
         if self.n_calls % self.log_freq == 0:
             obs = self.locals['new_obs'][0]
             dist_mm = (np.linalg.norm(obs) / 10.0) * 1000
-            if dist_mm < 1.0: status = "💎 PERFECT"
-            elif dist_mm < 3.0: status = "💰 JACKPOT"
-            elif dist_mm < 12.0: status = "⚡ BREAKING"
-            else: status = "🔥 HOT"
+            if dist_mm < 1.0: status = " PERFECT"
+            elif dist_mm < 3.0: status = " JACKPOT"
+            elif dist_mm < 12.0: status = " BREAKING"
+            else: status = "HOT"
             print(f"{self.num_timesteps:<10} | {dist_mm:>10.2f} mm | {status}")
         return True
 
@@ -30,46 +30,37 @@ class MaximusCallback(BaseCallback):
 # MAIN
 # ============================================================================
 def main():
-    # 1. NEW TASK NAME (CRITICAL TO FIX THE ERROR)
-    # By changing this name, we force ClearML to stop reusing the broken task ID
     PERSON_NAME = "hris"
-    UNIQUE_TASK_NAME = f'{PERSON_NAME}_Addiction_Maximus_FRESH_START_V4'
-
-    # 2. Argument Parsing
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--learning_rate", type=float, default=5e-5)
-    parser.add_argument("--total_timesteps", type=int, default=1000000)
-    args = parser.parse_args()
-
-    # 3. ClearML Initialization
+    
+    # --- 1. THE CRITICAL REUSE FIX ---
+    # reuse_last_task_id=False prevents ClearML from overwriting your broken run
     task = Task.init(
         project_name='Mentor Group - Jason/Group 1', 
-        task_name=UNIQUE_TASK_NAME
+        task_name=f'{PERSON_NAME}_Addiction_Maximus_FINAL',
+        reuse_last_task_id=False # <--- ADD THIS LINE
     )
 
-    # 4. Explicit Remote Configuration
-    # This tells the worker where to get the code
+    # --- 2. EXPLICIT REMOTE CONFIG ---
     task.set_repo(
         repo='https://github.com/AndriiRak243703/Y2B25_Task_11.git',
         branch='hris/rl-training'
     )
 
-    # This fixes the "invalid reference format" (No commas allowed!)
+    # This image name MUST be exactly this (no commas!)
     task.set_base_docker('deanis/2023y2b-rl:latest')
     
-    # Ensure dependencies are installed on the remote GPU
     task.set_packages(['tensorboard', 'clearml', 'gymnasium', 'stable-baselines3', 'pybullet'])
 
-    # Send to the default queue
+    # Enqueue to the GPU cluster
     task.execute_remotely(queue_name='default')
 
-    # 5. Training Logic
+    # --- 3. TRAINING LOGIC ---
     env = OT2Env(render=False)
     
     model = PPO(
         "MlpPolicy", 
         env, 
-        learning_rate=args.learning_rate,
+        learning_rate=5e-5,
         gamma=0.98,
         ent_coef=0.02,
         n_steps=1024,
@@ -80,7 +71,7 @@ def main():
 
     print(f"--- DEPLOYING {PERSON_NAME.upper()} ADDICTION MAXIMUS ---")
     try:
-        model.learn(total_timesteps=args.total_timesteps, callback=MaximusCallback())
+        model.learn(total_timesteps=2000000, callback=MaximusCallback())
         model.save(f"ot2_maximus_final")
     except KeyboardInterrupt:
         model.save(f"ot2_maximus_interrupted")
