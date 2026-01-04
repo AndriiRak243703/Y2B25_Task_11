@@ -3,7 +3,7 @@ from clearml import Task, Logger
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.vec_env import DummyVecEnv
-from ot2_gym_wrapper import OT2Env
+from hris_ot2_gym_wrapper import OT2Env
 import os
 import time
 
