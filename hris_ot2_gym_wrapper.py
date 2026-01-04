@@ -8,28 +8,16 @@ class OT2Env(gym.Env):
     def __init__(self, render=False):
         super(OT2Env, self).__init__()
         self.sim = Simulation(num_agents=1, render=render)
-        
-        # Action space: 3 velocities [x, y, z] normalized to [-1, 1]
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(3,), dtype=np.float32)
-        
-        # Observation space: 6D [curr_x, curr_y, curr_z, goal_x, goal_y, goal_z]
         self.observation_space = spaces.Box(low=-1.0, high=1.0, shape=(6,), dtype=np.float32)
         
-        # Workspace Bounds
         self.workspace_low = np.array([-0.1871, -0.1706, 0.1195], dtype=np.float32)
         self.workspace_high = np.array([0.2532, 0.2197, 0.2897], dtype=np.float32)
         
-        # Success and Settling Configuration
+        # Success Parameters
         self.goal_pos = np.array([0.18, 0.18, 0.10], dtype=np.float32)
-        self.target_threshold = 0.001 # 1mm
         self.settle_steps = 0
-        self.required_settle = 10
-        
-        # Reward Tiers (Dopamine Staircase)
-        self.tiers = [0.100, 0.050, 0.025, 0.015, 0.010, 0.005, 0.002, 0.001]
-        self.tier_rewards = [10, 20, 50, 100, 200, 500, 1000, 2000]
-        self.unlocked_tiers = [False] * len(self.tiers)
-        
+        self.required_settle = 15 # Harder to "win"
         self.steps = 0
 
     def _normalize_pos(self, pos):
@@ -43,61 +31,63 @@ class OT2Env(gym.Env):
         super().reset(seed=seed)
         self.steps = 0
         self.settle_steps = 0
-        self.unlocked_tiers = [False] * len(self.tiers)
         
         state_dict = self.sim.reset(num_agents=1)
         current_pos = self._extract_pos(state_dict)
         
-        # Fixed goal for consistency during precision training
-        self.goal_pos = np.array([0.18, 0.18, 0.10], dtype=np.float32)
-        
+        # --- THE "HOOK": SUCCESS PRIMING ---
+        # 5% of the time, spawn the goal RIGHT NEXT to the robot so it gets a "Free Win"
+        if random.random() < 0.05:
+            self.goal_pos = current_pos + np.random.uniform(-0.01, 0.01, size=3)
+        else:
+            self.goal_pos = np.array([0.18, 0.18, 0.10], dtype=np.float32)
+            
         obs = np.concatenate([self._normalize_pos(current_pos), self._normalize_pos(self.goal_pos)])
         return obs.astype(np.float32), {}
 
     def step(self, action):
         self.steps += 1
-        
-        # Action Scaling (Speed control)
         velocity = action * 2.0
         speed = np.linalg.norm(velocity)
-        full_action = [[float(velocity[0]), float(velocity[1]), float(velocity[2]), 0.0]]
         
-        state_dict = self.sim.run(full_action)
+        state_dict = self.sim.run([[float(velocity[0]), float(velocity[1]), float(velocity[2]), 0.0]])
         current_pos = self._extract_pos(state_dict)
-        
         curr_dist = np.linalg.norm(current_pos - self.goal_pos)
         
-        # --- PRECISION REWARD LOGIC ---
+        # ========================================================================
+        # THE GACHA REWARD ENGINE (ADDICTION MAXIMUS)
+        # ========================================================================
+        reward = 0
         
-        # 1. Gravity Well: Punish distance exponentially (forces agent to move)
-        reward = -15.0 * (curr_dist ** 0.4)
-        
-        # 2. Velocity Leash: Punish speed when very close (forces slowing down)
-        if curr_dist < 0.015: # Within 1.5cm
-            reward -= (speed * 8.0)
-            
-        # 3. Settling Mechanics
-        if curr_dist < self.target_threshold:
+        # 1. THE "SLOT MACHINE" NOISE (Fake Dopamine)
+        # Gives a tiny random reward just for moving, keeps the agent "pulling the lever"
+        if speed > 0.01:
+            reward += random.uniform(0, 0.05) 
+
+        # 2. THE GRAVITY WELL (The Hunger)
+        # Harsh penalty for being far away. 100mm = -3.1pts, 1mm = -0.3pts
+        reward -= 10.0 * (curr_dist ** 0.5)
+
+        # 3. NEAR-MISS BONUSES (The Tease)
+        # Rewards "almost winning" to keep it trying
+        if 0.005 < curr_dist < 0.015:
+            reward += 0.5 # "So close!"
+
+        # 4. THE 1mm JACKPOT (The Real Win)
+        if curr_dist < 0.001:
             self.settle_steps += 1
-            reward += 20.0 * self.settle_steps # Bonus for staying inside
+            # Exponentially increasing dopamine during settling
+            reward += (50.0 * self.settle_steps)
+            reward -= (speed * 20.0) # HEAVY penalty for moving while winning
         else:
-            self.settle_steps = 0 # Reset if it flies out
+            self.settle_steps = 0
 
-        # 4. Tiered Bonuses (The "Jackpots")
-        for i, threshold in enumerate(self.tiers):
-            if curr_dist < threshold and not self.unlocked_tiers[i]:
-                reward += self.tier_rewards[i]
-                self.unlocked_tiers[i] = True
-
-        # Termination: Must be settled to finish
+        # 5. THE ULTIMATE PAYOUT
         terminated = bool(self.settle_steps >= self.required_settle)
         if terminated:
-            reward += 5000.0 # The ultimate jackpot
+            reward += 10000.0 # THE GRAND PRIZE
         
-        truncated = self.steps >= 1000
+        truncated = self.steps >= 600 # Faster episodes for more "rounds" of gambling
         
         obs = np.concatenate([self._normalize_pos(current_pos), self._normalize_pos(self.goal_pos)])
         return obs.astype(np.float32), float(reward), terminated, truncated, {'dist_mm': curr_dist * 1000}
-
-    def close(self):
-        self.sim.close()
