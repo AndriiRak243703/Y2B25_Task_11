@@ -17,7 +17,7 @@ from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.vec_env import DummyVecEnv
 
 # ==============================================================================
-# 1. SIMULATION MANAGER
+# 1. SIMULATION MANAGER (Optimized)
 # ==============================================================================
 class Simulation:
     def __init__(self, num_agents, render=True, rgb_array=False):
@@ -77,6 +77,7 @@ class Simulation:
                 agent_count += 1
 
     def reset(self):
+        # Memory Leak Fix: Don't reload URDFs, just reset joints
         for robotId in self.robotIds:
             p.resetJointState(robotId, 0, 0)
             p.resetJointState(robotId, 1, 0)
@@ -84,7 +85,7 @@ class Simulation:
         return self.get_states()
 
     def run(self, actions, num_steps=1):
-        # SIMULATION LOOP
+        # TIME DILATION LOOP
         for _ in range(num_steps):
             self.apply_actions(actions)
             p.stepSimulation()
@@ -116,7 +117,7 @@ class Simulation:
         if p.isConnected(): p.disconnect()
 
 # ==============================================================================
-# 2. GYM ENVIRONMENT ("Small Steps" Logic)
+# 2. GYM ENVIRONMENT (Continuous Steps + Directional Penalty)
 # ==============================================================================
 class OT2Env(gym.Env):
     def __init__(self, render=False):
@@ -173,18 +174,17 @@ class OT2Env(gym.Env):
         dist_to_goal = self.prev_dist
         
         # --- "ALL THE WAY DOWN" VELOCITY SCALING ---
-        # Equation: max_vel = distance * 1.0
-        # If dist = 0.2m (20cm) -> max_vel = 0.2m/s (Fast)
-        # If dist = 0.001m (1mm) -> max_vel = 0.001m/s (Extremely Slow/Precise)
-        # Clamp: Minimum 0.001 to prevent freezing, Maximum 0.2 to prevent warping
-        linear_vel = dist_to_goal * 1.0
+        # The robot slows down continuously as it gets closer.
+        # At 20cm -> 0.2m/s
+        # At 1mm -> 0.001m/s
+        linear_vel = dist_to_goal * 1.0 
         max_vel = np.clip(linear_vel, 0.001, 0.2)
         
         velocity = np.clip(action, -1.0, 1.0) * max_vel
         
         # --- TIME DILATION ---
-        # Run 15 physics steps per 1 Gym step. 
-        # This gives the robot "time" to move at these slow speeds.
+        # 15 physics steps per 1 Gym step. 
+        # This prevents timeout when moving at 1mm/s.
         self.sim.run([[float(velocity[0]), float(velocity[1]), float(velocity[2])]], num_steps=15)
         
         state_dict = self.sim.get_states()
@@ -192,14 +192,21 @@ class OT2Env(gym.Env):
         curr_dist = np.linalg.norm(new_pos - self.goal_pos)
         
         # --- REWARD SHAPING ---
-        # 1. Progression (Standard)
+        # 1. Progression (Implicitly punishes moving away with negative values)
         reward = (self.prev_dist - curr_dist) * 500.0
         
-        # 2. Gravity Well (Always pulling to 0)
-        reward += 1.0 / (curr_dist + 0.01)
+        # 2. EXTRA DIRECTIONAL PENALTY (User Requested)
+        # If moving AWAY from target (curr > prev), add extra pain.
+        if curr_dist > self.prev_dist:
+            reward -= (curr_dist - self.prev_dist) * 500.0 # Effectively doubles the penalty
+            reward -= 0.5 # Flat penalty for bad decision
         
-        # 3. Step Penalty 
-        reward -= 0.1
+        # 3. Sharper Gravity Well 
+        # Encourages being close even if stationary
+        reward += 1.0 / (curr_dist + 0.005)
+        
+        # 4. Step Penalty (Urgency)
+        reward -= 0.05
         
         terminated = False
         if curr_dist < 0.001: 
