@@ -49,8 +49,8 @@ class AdvancedMonitorCallback(BaseCallback):
             # Update best precision record
             if dist_m < self.best_precision:
                 self.best_precision = dist_m
-                # Only save trajectory image if it is a meaningful improvement (<20mm)
-                if dist_m < 0.02: 
+                # Save trajectory if it's a new best record < 50mm
+                if dist_m < 0.05: 
                     self._save_best_trajectory()
 
         # Tracking trajectory 
@@ -60,8 +60,7 @@ class AdvancedMonitorCallback(BaseCallback):
         # Log at regular intervals
         if self.n_calls % self.check_freq == 0:
             self._evaluate_and_log()
-            # Explicit Garbage Collection to prevent memory creep
-            gc.collect()
+            gc.collect() # Garbage collection
             
         return True
 
@@ -80,7 +79,6 @@ class AdvancedMonitorCallback(BaseCallback):
         if len(self.current_trajectory) > 0:
             try:
                 traj = np.array(self.current_trajectory)
-                # Ensure we close previous figures to stop memory leak
                 plt.close('all') 
                 
                 fig = plt.figure(figsize=(10, 8))
@@ -92,8 +90,7 @@ class AdvancedMonitorCallback(BaseCallback):
                 
                 img_path = os.path.join(self.save_path, f'best_traj_{self.n_calls}.png')
                 plt.savefig(img_path)
-                plt.close(fig) # Explicit close
-                plt.close('all') # Double check
+                plt.close(fig)
                 
                 if self.clearml_logger:
                     self.clearml_logger.report_image("Best Trajectories", "3D Plot", self.n_calls, img_path)
@@ -105,7 +102,7 @@ class AdvancedMonitorCallback(BaseCallback):
 def main():
     task = Task.init(
         project_name='Mentor Group - Myrthe/Group 1', 
-        task_name='hris_Precision_Training_Fixed_v4', 
+        task_name='hris_Precision_Training_Fixed_v5', 
         task_type=Task.TaskTypes.training,
         reuse_last_task_id=False
     )
@@ -115,7 +112,6 @@ def main():
     task.set_packages(['tensorboard', 'clearml', 'gymnasium', 'stable-baselines3==2.2.1', 'pybullet==3.2.5', 'matplotlib'])
     task.execute_remotely(queue_name='default', exit_process=True)
     
-    # Initialize Environment
     env = OT2Env(render=False)
     env = DummyVecEnv([lambda: env])
     
@@ -129,20 +125,19 @@ def main():
         gamma=0.998,
         gae_lambda=0.98,
         clip_range=0.15,
-        ent_coef=0.0005,
+        ent_coef=0.001, # INCREASED ENTROPY to break 85mm stagnation
         vf_coef=0.6,
-        max_grad_norm=0.3,
+        max_grad_norm=0.5,
         normalize_advantage=True,
         verbose=1,
         tensorboard_log="./ppo_logs/",
         device="auto"
     )
     
-    # Callback with frequent logging but infrequent saving
     adv_callback = AdvancedMonitorCallback(check_freq=5000, save_path='./models', verbose=1)
     
     try:
-        model.learn(total_timesteps=10_000_000, callback=adv_callback, tb_log_name="PPO_Precision", progress_bar=True)
+        model.learn(total_timesteps=5_000_000, callback=adv_callback, tb_log_name="PPO_Precision", progress_bar=True)
         model.save("final_model")
         task.upload_artifact("final_model", "final_model.zip")
     finally:

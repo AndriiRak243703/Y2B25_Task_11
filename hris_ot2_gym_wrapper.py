@@ -131,7 +131,7 @@ class Simulation:
         if p.isConnected(): p.disconnect()
 
 # ==============================================================================
-# 2. GYM ENVIRONMENT (Precision Tuned)
+# 2. GYM ENVIRONMENT (Precision Tuned V2)
 # ==============================================================================
 class OT2Env(gym.Env):
     def __init__(self, render=False):
@@ -185,7 +185,7 @@ class OT2Env(gym.Env):
         return np.concatenate([
             self._normalize_pos(pos),
             self._normalize_pos(self.goal_pos),
-            np.clip(velocity, -1, 1), # Velocity is implicitly normalized by limits
+            np.clip(velocity, -1, 1), 
             [norm_dist * 2 - 1]
         ]).astype(np.float32)
 
@@ -193,14 +193,14 @@ class OT2Env(gym.Env):
         self.steps += 1
         dist_to_goal = self.prev_dist
         
-        # --- PRECISION ENGINEERING: VELOCITY CLAMPING ---
-        # "Down the rabbit hole": As we get closer, drastically reduce max speed
-        if dist_to_goal < 0.020: # Within 20mm
-            max_vel = 0.005  # 5mm/s (Very Slow/Precise)
-        elif dist_to_goal < 0.050: # Within 50mm
-            max_vel = 0.02   # 20mm/s
+        # --- GRADUAL VELOCITY CLAMPING ---
+        # Adjusted: Start slowing down at 100mm (0.1m) to catch the 85mm plateau
+        if dist_to_goal < 0.020: # < 20mm
+            max_vel = 0.005      # Super precise
+        elif dist_to_goal < 0.100: # < 100mm (The new "Rabbit Hole Entrance")
+            max_vel = 0.03       # Slow down significantly to allow fine control
         else:
-            max_vel = 0.1    # 100mm/s (Approach speed)
+            max_vel = 0.1        # Full speed
             
         velocity = np.clip(action, -1.0, 1.0) * max_vel
         
@@ -212,23 +212,29 @@ class OT2Env(gym.Env):
         new_pos = np.array(state_dict[next(iter(state_dict))]['pipette_position'], dtype=np.float32)
         curr_dist = np.linalg.norm(new_pos - self.goal_pos)
         
-        # --- REWARD SHAPING ---
-        # 1. Progression Reward
+        # --- REWARD SHAPING (Fixed for Stagnation) ---
+        # 1. Progression Reward (Velocity)
         reward = (self.prev_dist - curr_dist) * 1000.0
         
-        # 2. Time Penalty
-        reward -= 0.01 
+        # 2. Gravity Well (Position) - NEW
+        # Gives a small continuous reward for being close, even if not moving.
+        # This helps break stagnation by preferring position A over B if A is closer.
+        reward += 1.0 / (curr_dist + 0.1) 
         
-        # 3. The "Rabbit Hole" Bonus (Dense reward < 20mm)
-        if curr_dist < 0.020:
-            # Adds extra reward as it gets closer to 0 within the 20mm bubble
-            # Range: ~0.0 to 2.0 extra per step
-            reward += (0.020 - curr_dist) * 100.0
+        # 3. Zone Bonuses (Widened)
+        if curr_dist < 0.100: # Enters 100mm zone
+            reward += 1.0     # Small cookie
+        if curr_dist < 0.050: # Enters 50mm zone
+            reward += 2.0     # Medium cookie
+        if curr_dist < 0.020: # Enters 20mm zone
+            reward += 5.0     # Big cookie
+        
+        reward -= 0.05 # Slightly higher time penalty to discourage loitering
         
         terminated = False
         # Success Condition: 1mm
         if curr_dist < 0.001: 
-            reward += 100.0
+            reward += 200.0
             terminated = True
         
         self.prev_dist = curr_dist
