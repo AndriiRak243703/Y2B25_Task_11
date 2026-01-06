@@ -15,27 +15,36 @@ class PrecisionLRScheduler(BaseCallback):
         self.current_lr = 2.5e-4
 
     def _on_step(self) -> bool:
+        # Log distance only on episode done
         if self.locals['dones'][0]:
             dist_mm = self.locals['infos'][0].get('distance', 1.0) * 1000
             self.precision_buffer.append(dist_mm)
-            if len(self.precision_buffer) > 50: self.precision_buffer.pop(0)
+            if len(self.precision_buffer) > 50:
+                self.precision_buffer.pop(0)
 
+        # Adjust LR periodically
         if self.n_calls % self.check_freq == 0 and self.precision_buffer:
             avg_dist = np.mean(self.precision_buffer)
-            # Dynamic Learning Rate Logic
-            new_lr = 2.5e-4
-            if avg_dist < 2.0: new_lr = 1e-5
-            elif avg_dist < 5.0: new_lr = 5e-5
-            elif avg_dist < 20.0: new_lr = 1e-4
-            
+            # Dynamic LR based on precision
+            if avg_dist < 1.0:
+                new_lr = 5e-6    # Very fine tuning
+            elif avg_dist < 2.0:
+                new_lr = 1e-5
+            elif avg_dist < 5.0:
+                new_lr = 5e-5
+            elif avg_dist < 15.0:
+                new_lr = 1e-4
+            else:
+                new_lr = 2.5e-4  # Default
+
             if new_lr != self.current_lr:
                 self.current_lr = new_lr
-                # Update the optimizer learning rate
+                # Update optimizer LR
                 for param_group in self.model.policy.optimizer.param_groups:
                     param_group['lr'] = new_lr
-                print(f"Step {self.n_calls} | Avg: {avg_dist:.2f}mm | Adjusted LR to: {new_lr}")
+                print(f"Step {self.n_calls} | Avg Dist: {avg_dist:.2f}mm | LR → {new_lr:.1e}")
             else:
-                print(f"Step {self.n_calls} | Avg: {avg_dist:.2f}mm | LR: {self.current_lr}")
+                print(f"Step {self.n_calls} | Avg Dist: {avg_dist:.2f}mm | LR: {self.current_lr:.1e}")
             gc.collect()
         return True
 
@@ -44,11 +53,20 @@ def main():
     task.execute_remotely(queue_name='default', exit_process=True)
     
     env = DummyVecEnv([lambda: OT2Env(render=False)])
-    # Initial model setup
-    model = PPO("MlpPolicy", env, learning_rate=2.5e-4, n_steps=2048, batch_size=64, 
-                gamma=0.998, ent_coef=0.001, verbose=1)
     
-    # Run with the dynamic scheduler
+    model = PPO(
+        "MlpPolicy",
+        env,
+        learning_rate=2.5e-4,
+        n_steps=2048,
+        batch_size=64,
+        gamma=0.995,        # Slightly reduced
+        ent_coef=0.001,
+        verbose=1,
+        tensorboard_log="./ppo_ot2_tensorboard/"
+    )
+    
+    # Train for 5 million steps
     model.learn(total_timesteps=5_000_000, callback=PrecisionLRScheduler())
     model.save("final_model")
     task.upload_artifact("final_model", "final_model.zip")
