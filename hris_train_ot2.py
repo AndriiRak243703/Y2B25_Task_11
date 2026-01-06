@@ -13,16 +13,22 @@ class MonitorCallback(BaseCallback):
         self.check_freq = check_freq
         self.save_path = save_path
         self.best_precision = np.inf
+        self.precision_buffer = []  # <--- Added buffer
         os.makedirs(save_path, exist_ok=True)
 
     def _on_step(self) -> bool:
         if self.locals['dones'][0]:
             dist_mm = self.locals['infos'][0].get('distance', 1.0) * 1000
+            self.precision_buffer.append(dist_mm)  # <--- Store distance
+            if len(self.precision_buffer) > 100: self.precision_buffer.pop(0) # Keep last 100
+            
             if dist_mm < self.best_precision: self.best_precision = dist_mm
             
         if self.n_calls % self.check_freq == 0:
-            print(f"Step {self.n_calls} | Best: {self.best_precision:.2f}mm")
-            gc.collect() # Prevent memory leak
+            # <--- Calculate Average
+            avg_dist = np.mean(self.precision_buffer) if self.precision_buffer else 0 
+            print(f"Step {self.n_calls} | Avg: {avg_dist:.2f}mm | Best: {self.best_precision:.2f}mm")
+            gc.collect()
         return True
 
 def main():
