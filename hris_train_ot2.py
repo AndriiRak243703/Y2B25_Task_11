@@ -65,6 +65,7 @@ def main():
     model = PPO(
         "MlpPolicy",
         env,
+        device="cpu",
         learning_rate=2.5e-4,
         n_steps=2048,
         batch_size=64,
