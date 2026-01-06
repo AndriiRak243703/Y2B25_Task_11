@@ -3,6 +3,7 @@ import os
 import matplotlib
 matplotlib.use('Agg') 
 import matplotlib.pyplot as plt
+import gc
 from clearml import Task, Logger
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback
@@ -15,12 +16,7 @@ class AdvancedMonitorCallback(BaseCallback):
         self.check_freq = check_freq
         self.checkpoint_freq = checkpoint_freq
         self.save_path = save_path
-        self.best_mean_reward = -np.inf
-        self.best_precision = np.inf  
-        self.last_improvement = 0
-        self.max_no_improvement = 500_000
-        
-        # Performance Tracking
+        self.best_precision = np.inf 
         self.precision_buffer = [] 
         self.success_buffer = []   
         self.current_trajectory = []
@@ -30,7 +26,7 @@ class AdvancedMonitorCallback(BaseCallback):
         self.clearml_logger = Logger.current_logger()
 
     def _on_step(self) -> bool:
-        # Checkpoint logic (moved to infrequent check)
+        # Checkpoint logic
         if self.n_calls % self.checkpoint_freq == 0:
             chk_name = f"checkpoint_{self.n_calls}"
             path = os.path.join(self.save_path, f"{chk_name}.zip")
@@ -38,8 +34,7 @@ class AdvancedMonitorCallback(BaseCallback):
             if Task.current_task():
                 Task.current_task().upload_artifact(name=chk_name, artifact_object=path)
 
-        # CAPTURE METRICS IMMEDIATELY ON EPISODE END
-        # This fixes the "0.00mm" issue by catching the signal exactly when it happens
+        # CAPTURE METRICS
         info = self.locals['infos'][0]
         if self.locals['dones'][0]:
             dist_m = info.get('distance', 1.0)
@@ -47,7 +42,6 @@ class AdvancedMonitorCallback(BaseCallback):
             self.precision_buffer.append(dist_mm)
             self.success_buffer.append(1 if dist_mm <= 1.0 else 0)
             
-            # Keep buffers at last 100 episodes
             if len(self.precision_buffer) > 100:
                 self.precision_buffer.pop(0)
                 self.success_buffer.pop(0)
@@ -55,17 +49,19 @@ class AdvancedMonitorCallback(BaseCallback):
             # Update best precision record
             if dist_m < self.best_precision:
                 self.best_precision = dist_m
-                self.last_improvement = self.n_calls
-                if dist_m < 0.001: # 1mm threshold
+                # Only save trajectory image if it is a meaningful improvement (<20mm)
+                if dist_m < 0.02: 
                     self._save_best_trajectory()
 
-        # Tracking trajectory for plotting (optional, can be disabled for max FPS)
+        # Tracking trajectory 
         if 'position' in info:
             self.current_trajectory.append(info['position'].copy())
 
-        # Log at regular intervals to save on overhead
+        # Log at regular intervals
         if self.n_calls % self.check_freq == 0:
             self._evaluate_and_log()
+            # Explicit Garbage Collection to prevent memory creep
+            gc.collect()
             
         return True
 
@@ -74,36 +70,42 @@ class AdvancedMonitorCallback(BaseCallback):
         success_rate = np.mean(self.success_buffer) * 100 if self.success_buffer else 0
         
         if self.clearml_logger:
-            # Grouped scalar reporting to minimize API calls
             self.clearml_logger.report_scalar("Precision Tracker", "Rolling Avg Distance (mm)", avg_precision, self.n_calls)
             self.clearml_logger.report_scalar("Precision Tracker", "Success Rate (%)", success_rate, self.n_calls)
             self.clearml_logger.report_scalar("Precision Tracker", "All-Time Best (mm)", self.best_precision * 1000, self.n_calls)
 
-        # Print status
         print(f"Step {self.n_calls:,} | Success: {success_rate:.1f}% | Avg Dist: {avg_precision:.2f}mm | Best: {self.best_precision*1000:.2f}mm")
 
     def _save_best_trajectory(self):
-        # This only runs when you hit <1mm, so it won't impact general FPS
         if len(self.current_trajectory) > 0:
             try:
                 traj = np.array(self.current_trajectory)
+                # Ensure we close previous figures to stop memory leak
+                plt.close('all') 
+                
                 fig = plt.figure(figsize=(10, 8))
                 ax = fig.add_subplot(111, projection='3d')
-                ax.plot(traj[:, 0], traj[:, 1], traj[:, 2], 'b-')
-                ax.scatter(traj[-1, 0], traj[-1, 1], traj[-1, 2], c='r', s=100)
+                ax.plot(traj[:, 0], traj[:, 1], traj[:, 2], 'b-', alpha=0.6)
+                ax.scatter(traj[-1, 0], traj[-1, 1], traj[-1, 2], c='r', s=100, label='End')
+                ax.scatter(traj[0, 0], traj[0, 1], traj[0, 2], c='g', s=100, label='Start')
+                ax.legend()
+                
                 img_path = os.path.join(self.save_path, f'best_traj_{self.n_calls}.png')
                 plt.savefig(img_path)
-                plt.close(fig)
+                plt.close(fig) # Explicit close
+                plt.close('all') # Double check
+                
                 if self.clearml_logger:
                     self.clearml_logger.report_image("Best Trajectories", "3D Plot", self.n_calls, img_path)
-            except Exception:
-                pass
-            self.current_trajectory = [] # Clear after save
+            except Exception as e:
+                print(f"Error saving trajectory: {e}")
+            
+            self.current_trajectory = [] 
 
 def main():
     task = Task.init(
         project_name='Mentor Group - Myrthe/Group 1', 
-        task_name='hris_Precision_Training_Optimized', 
+        task_name='hris_Precision_Training_Fixed_v4', 
         task_type=Task.TaskTypes.training,
         reuse_last_task_id=False
     )
@@ -113,6 +115,7 @@ def main():
     task.set_packages(['tensorboard', 'clearml', 'gymnasium', 'stable-baselines3==2.2.1', 'pybullet==3.2.5', 'matplotlib'])
     task.execute_remotely(queue_name='default', exit_process=True)
     
+    # Initialize Environment
     env = OT2Env(render=False)
     env = DummyVecEnv([lambda: env])
     
@@ -135,11 +138,11 @@ def main():
         device="auto"
     )
     
-    # Starting with a clean callback
+    # Callback with frequent logging but infrequent saving
     adv_callback = AdvancedMonitorCallback(check_freq=5000, save_path='./models', verbose=1)
     
     try:
-        model.learn(total_timesteps=5_000_000, callback=adv_callback, tb_log_name="PPO_Precision", progress_bar=True)
+        model.learn(total_timesteps=10_000_000, callback=adv_callback, tb_log_name="PPO_Precision", progress_bar=True)
         model.save("final_model")
         task.upload_artifact("final_model", "final_model.zip")
     finally:
