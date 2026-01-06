@@ -11,13 +11,9 @@ import matplotlib
 # Set non-interactive backend for headless docker environments
 matplotlib.use('Agg') 
 import matplotlib.pyplot as plt
-from clearml import Task, Logger
-from stable_baselines3 import PPO
-from stable_baselines3.common.callbacks import BaseCallback
-from stable_baselines3.common.vec_env import DummyVecEnv
 
 # ==============================================================================
-# 1. SIMULATION MANAGER (Optimized)
+# 1. SIMULATION MANAGER (Optimized & Stable)
 # ==============================================================================
 class Simulation:
     def __init__(self, num_agents, render=True, rgb_array=False):
@@ -117,7 +113,7 @@ class Simulation:
         if p.isConnected(): p.disconnect()
 
 # ==============================================================================
-# 2. GYM ENVIRONMENT (Continuous Steps + Directional Penalty)
+# 2. GYM ENVIRONMENT (Clean Gravity Well - NO FEAR PENALTIES)
 # ==============================================================================
 class OT2Env(gym.Env):
     def __init__(self, render=False):
@@ -173,44 +169,40 @@ class OT2Env(gym.Env):
         self.steps += 1
         dist_to_goal = self.prev_dist
         
-        # --- "ALL THE WAY DOWN" VELOCITY SCALING ---
-        # The robot slows down continuously as it gets closer.
-        # At 20cm -> 0.2m/s
-        # At 1mm -> 0.001m/s
+        # --- CONTINUOUS VELOCITY SCALING ---
+        # Forces the robot to slow down as it approaches. 
+        # Crucial for preventing overshoot.
         linear_vel = dist_to_goal * 1.0 
         max_vel = np.clip(linear_vel, 0.001, 0.2)
         
         velocity = np.clip(action, -1.0, 1.0) * max_vel
         
         # --- TIME DILATION ---
-        # 15 physics steps per 1 Gym step. 
-        # This prevents timeout when moving at 1mm/s.
+        # 15 physics steps per Gym step. Allows low-velocity moves to actually happen.
         self.sim.run([[float(velocity[0]), float(velocity[1]), float(velocity[2])]], num_steps=15)
         
         state_dict = self.sim.get_states()
         new_pos = np.array(state_dict[next(iter(state_dict))]['pipette_position'], dtype=np.float32)
         curr_dist = np.linalg.norm(new_pos - self.goal_pos)
         
-        # --- REWARD SHAPING ---
-        # 1. Progression (Implicitly punishes moving away with negative values)
-        reward = (self.prev_dist - curr_dist) * 500.0
+        # --- REWARD SHAPING (The Bypass) ---
+        # 1. Progression: Lowered to 200.0. Good behavior, but not "Jackpot" level.
+        reward = (self.prev_dist - curr_dist) * 200.0
         
-        # 2. EXTRA DIRECTIONAL PENALTY (User Requested)
-        # If moving AWAY from target (curr > prev), add extra pain.
-        if curr_dist > self.prev_dist:
-            reward -= (curr_dist - self.prev_dist) * 500.0 # Effectively doubles the penalty
-            reward -= 0.5 # Flat penalty for bad decision
-        
-        # 3. Sharper Gravity Well 
-        # Encourages being close even if stationary
+        # 2. Gravity Well: THE PRIMARY DRIVER.
+        # This pays continuously. 
+        # At Wall (300mm): +3.3 pts
+        # At 100mm: +9.5 pts
+        # At 1mm: +166 pts
+        # It is ALWAYS better to move closer. No penalty traps.
         reward += 1.0 / (curr_dist + 0.005)
         
-        # 4. Step Penalty (Urgency)
+        # 3. Step Penalty: Gentle urgency
         reward -= 0.05
         
         terminated = False
         if curr_dist < 0.001: 
-            reward += 200.0
+            reward += 100.0
             terminated = True
         
         self.prev_dist = curr_dist

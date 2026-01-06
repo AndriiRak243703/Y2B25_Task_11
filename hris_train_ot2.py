@@ -94,7 +94,7 @@ class AdvancedMonitorCallback(BaseCallback):
 def main():
     task = Task.init(
         project_name='Mentor Group - Myrthe/Group 1', 
-        task_name='hris_Precision_Training_Final_v7', 
+        task_name='hris_Precision_Training_Final_NoFear', 
         task_type=Task.TaskTypes.training,
         reuse_last_task_id=False
     )
