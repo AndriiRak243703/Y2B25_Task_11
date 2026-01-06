@@ -6,6 +6,14 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.vec_env import DummyVecEnv
 from hris_ot2_gym_wrapper import OT2Env
+import subprocess
+import sys
+
+# Force installation at runtime if it's missing
+try:
+    import tensorboard
+except ImportError:
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "tensorboard"])
 
 class PrecisionLRScheduler(BaseCallback):
     def __init__(self, check_freq=5000):
@@ -49,7 +57,7 @@ class PrecisionLRScheduler(BaseCallback):
         return True
 
 def main():
-    task = Task.init(project_name='Mentor Group - Myrthe/Group 1', task_name='hris_Precision_Final_DynamicLR')
+    task = Task.init(project_name='Mentor Group - Myrthe/Group 1', task_name='hris_Precision_hope_and_prayers')
     task.execute_remotely(queue_name='default', exit_process=True)
     
     env = DummyVecEnv([lambda: OT2Env(render=False)])
