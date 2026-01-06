@@ -26,7 +26,6 @@ class AdvancedMonitorCallback(BaseCallback):
         self.clearml_logger = Logger.current_logger()
 
     def _on_step(self) -> bool:
-        # Checkpoint logic
         if self.n_calls % self.checkpoint_freq == 0:
             chk_name = f"checkpoint_{self.n_calls}"
             path = os.path.join(self.save_path, f"{chk_name}.zip")
@@ -34,7 +33,6 @@ class AdvancedMonitorCallback(BaseCallback):
             if Task.current_task():
                 Task.current_task().upload_artifact(name=chk_name, artifact_object=path)
 
-        # CAPTURE METRICS
         info = self.locals['infos'][0]
         if self.locals['dones'][0]:
             dist_m = info.get('distance', 1.0)
@@ -46,21 +44,17 @@ class AdvancedMonitorCallback(BaseCallback):
                 self.precision_buffer.pop(0)
                 self.success_buffer.pop(0)
 
-            # Update best precision record
             if dist_m < self.best_precision:
                 self.best_precision = dist_m
-                # Save trajectory if it's a new best record < 50mm
                 if dist_m < 0.05: 
                     self._save_best_trajectory()
 
-        # Tracking trajectory 
         if 'position' in info:
             self.current_trajectory.append(info['position'].copy())
 
-        # Log at regular intervals
         if self.n_calls % self.check_freq == 0:
             self._evaluate_and_log()
-            gc.collect() # Garbage collection
+            gc.collect() 
             
         return True
 
@@ -84,9 +78,8 @@ class AdvancedMonitorCallback(BaseCallback):
                 fig = plt.figure(figsize=(10, 8))
                 ax = fig.add_subplot(111, projection='3d')
                 ax.plot(traj[:, 0], traj[:, 1], traj[:, 2], 'b-', alpha=0.6)
-                ax.scatter(traj[-1, 0], traj[-1, 1], traj[-1, 2], c='r', s=100, label='End')
-                ax.scatter(traj[0, 0], traj[0, 1], traj[0, 2], c='g', s=100, label='Start')
-                ax.legend()
+                ax.scatter(traj[-1, 0], traj[-1, 1], traj[-1, 2], c='r', s=100)
+                ax.scatter(traj[0, 0], traj[0, 1], traj[0, 2], c='g', s=100)
                 
                 img_path = os.path.join(self.save_path, f'best_traj_{self.n_calls}.png')
                 plt.savefig(img_path)
@@ -94,15 +87,14 @@ class AdvancedMonitorCallback(BaseCallback):
                 
                 if self.clearml_logger:
                     self.clearml_logger.report_image("Best Trajectories", "3D Plot", self.n_calls, img_path)
-            except Exception as e:
-                print(f"Error saving trajectory: {e}")
-            
+            except Exception:
+                pass
             self.current_trajectory = [] 
 
 def main():
     task = Task.init(
         project_name='Mentor Group - Myrthe/Group 1', 
-        task_name='hris_Precision_Training_Fixed_v5', 
+        task_name='hris_Precision_Training_Continuous', 
         task_type=Task.TaskTypes.training,
         reuse_last_task_id=False
     )
@@ -125,7 +117,7 @@ def main():
         gamma=0.998,
         gae_lambda=0.98,
         clip_range=0.15,
-        ent_coef=0.001, # INCREASED ENTROPY to break 85mm stagnation
+        ent_coef=0.001,
         vf_coef=0.6,
         max_grad_norm=0.5,
         normalize_advantage=True,
