@@ -21,18 +21,15 @@ except ImportError:
     subprocess.check_call([sys.executable, "-m", "pip", "install", "tensorboard"])
 
 # ==========================================
-# 🚀 SIMULATION (LOW FORCE / LOW SPEED)
+# 🚀 SIMULATION
 # ==========================================
 class Simulation:
     def __init__(self, num_agents, render=False):
         self.physicsClient = p.connect(p.DIRECT)
-        
         p.setAdditionalSearchPath(pybullet_data.getDataPath())
         p.setGravity(0, 0, -10)
-        
         self.planeId = p.loadURDF("plane.urdf")
         self.pipette_offset = [0.073, 0.0895, 0.0895]
-        
         self.robotIds = []
         self.robot_joint_info = []
         self.create_robots(num_agents)
@@ -47,13 +44,11 @@ class Simulation:
                 pos = [-spacing * i, -spacing * j, 0.03]
                 robot_id = p.loadURDF("ot_2_simulation_v6.urdf", pos, [0, 0, 0, 1], useFixedBase=True)
                 self.robotIds.append(robot_id)
-
                 joint_name_to_id = {}
                 for joint_index in range(p.getNumJoints(robot_id)):
                     info = p.getJointInfo(robot_id, joint_index)
                     name = info[1].decode('utf-8')
                     joint_name_to_id[name] = joint_index
-
                 self.robot_joint_info.append({
                     'x': joint_name_to_id['Slider_3'],
                     'y': joint_name_to_id['Slider_4'],
@@ -74,10 +69,9 @@ class Simulation:
             for i, rId in enumerate(self.robotIds):
                 joints = self.robot_joint_info[i]
                 vx, vy, vz = actions[i]
-                # ✅ LOW FORCE: Prevents "jerky" acceleration
-                p.setJointMotorControl2(rId, joints['x'], p.VELOCITY_CONTROL, targetVelocity=vx, force=100)
-                p.setJointMotorControl2(rId, joints['y'], p.VELOCITY_CONTROL, targetVelocity=vy, force=100)
-                p.setJointMotorControl2(rId, joints['z'], p.VELOCITY_CONTROL, targetVelocity=vz, force=150)
+                p.setJointMotorControl2(rId, joints['x'], p.VELOCITY_CONTROL, targetVelocity=vx, force=150)
+                p.setJointMotorControl2(rId, joints['y'], p.VELOCITY_CONTROL, targetVelocity=vy, force=150)
+                p.setJointMotorControl2(rId, joints['z'], p.VELOCITY_CONTROL, targetVelocity=vz, force=200)
             p.stepSimulation()
         return self.get_states()
 
@@ -86,12 +80,7 @@ class Simulation:
         for idx, rId in enumerate(self.robotIds):
             joints = self.robot_joint_info[idx]
             js = p.getJointStates(rId, [joints['x'], joints['y'], joints['z']])
-            
-            pos = [
-                js[0][0] + self.pipette_offset[0],
-                js[1][0] + self.pipette_offset[1],
-                js[2][0] + self.pipette_offset[2]
-            ]
+            pos = [js[0][0] + self.pipette_offset[0], js[1][0] + self.pipette_offset[1], js[2][0] + self.pipette_offset[2]]
             vel = [js[0][1], js[1][1], js[2][1]]
             states.append((pos, vel))
         return states
@@ -99,83 +88,83 @@ class Simulation:
     def close(self):
         p.disconnect()
 
-
 class OT2Env(gym.Env):
     def __init__(self, render=False):
         super().__init__()
         self.sim = Simulation(num_agents=1, render=render)
-        
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(3,), dtype=np.float32)
         self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(10,), dtype=np.float32)
-        
         self.workspace_low = np.array([-0.1871, -0.1706, 0.1195], dtype=np.float32)
         self.workspace_high = np.array([0.2532, 0.2197, 0.2897], dtype=np.float32)
         self.workspace_span = self.workspace_high - self.workspace_low
-        
         self.goal_pos = np.zeros(3)
         self.steps = 0
         self.prev_dist = 0.0
         self.last_action = np.zeros(3, dtype=np.float32)
         
-        # ✅ DRACONIAN SPEED LIMIT: 3 cm/s
-        self.max_vel = 0.03 
+        # Base max speed (Fast enough to travel, slow enough to control)
+        self.base_max_vel = 0.05 
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         self.steps = 0
         self.last_action = np.zeros(3, dtype=np.float32)
         self.goal_pos = self.np_random.uniform(self.workspace_low, self.workspace_high).astype(np.float32)
-        
         states = self.sim.reset()
         curr_pos = np.array(states[0][0], dtype=np.float32)
         curr_pos = np.clip(curr_pos, self.workspace_low, self.workspace_high)
-        
         self.prev_dist = np.linalg.norm(curr_pos - self.goal_pos)
         return self._get_obs(curr_pos, np.zeros(3)), {"goal": self.goal_pos}
 
     def _get_obs(self, pos, vel):
         rel_pos = self.goal_pos - pos
         norm_rel_pos = rel_pos / self.workspace_span 
-        norm_vel = vel / self.max_vel 
+        norm_vel = vel / self.base_max_vel 
         return np.concatenate([norm_rel_pos, norm_vel, self.last_action, [self.prev_dist]]).astype(np.float32)
 
     def step(self, action):
         self.steps += 1
         self.last_action = np.clip(action, -1.0, 1.0).astype(np.float32)
         
-        # Physics: Apply Max Vel Cap
-        vel_cmd = self.last_action * self.max_vel
+        # ============================================================
+        # ⚙️ VIRTUAL GEARBOX (THE FIX)
+        # ============================================================
+        # As distance shrinks, we shrink the effective max velocity.
+        # Dist > 5cm:  Full speed (0.05 m/s)
+        # Dist = 2cm:  Speed cap becomes 0.02 m/s
+        # Dist = 1mm:  Speed cap becomes 0.001 m/s (Super fine control)
+        
+        # We clamp the "scaling factor" so it doesn't go below 0.1 (to avoid freezing)
+        dist_scale = np.clip(self.prev_dist / 0.05, 0.1, 1.0)
+        current_max_vel = self.base_max_vel * dist_scale
+        
+        vel_cmd = self.last_action * current_max_vel
 
         states = self.sim.run([vel_cmd], num_steps=5)
         new_pos = np.array(states[0][0], dtype=np.float32)
         new_vel = np.array(states[0][1], dtype=np.float32)
-        
         new_pos = np.clip(new_pos, self.workspace_low - 0.01, self.workspace_high + 0.01)
         curr_dist = np.linalg.norm(new_pos - self.goal_pos)
 
-        # =======================
-        # 🛡️ THE ANTI-SPEED REWARD
-        # =======================
+        # Rewards
+        progress = (self.prev_dist - curr_dist) * 1000.0
         
-        # 1. Raw Progress
-        raw_progress = (self.prev_dist - curr_dist) * 1000.0
+        # 🛡️ CONDITIONAL SPEED PENALTY
+        # Only punish speed if we are FAR away (> 5cm). 
+        # Once close, we STOP punishing speed so it can actually finish the job.
+        speed_penalty = 0.0
+        if curr_dist > 0.05:
+            speed_penalty = -2.0 * np.linalg.norm(new_vel)
         
-        # 2. ✅ CLIPPED REWARD: This is the secret sauce.
-        # We cap the reward at 0.2. Even if the agent jumps 10mm, it only gets 0.2 points.
-        # This removes the incentive to sprint. It gets the same reward for a small, controlled step.
-        progress_reward = np.clip(raw_progress, -10.0, 0.2)
-        
-        # 3. ✅ HEAVY SPEED PENALTY:
-        # If max_vel is 0.03, max norm is ~0.05.
-        # 0.05 * 5.0 = -0.25 penalty.
-        # This penalty is LARGER than the max progress reward if it goes full speed.
-        # Result: It MUST go slower than max speed to profit.
-        speed_penalty = -5.0 * np.linalg.norm(new_vel)
-        
-        # 4. Action Penalty (Efficiency)
-        action_penalty = -0.1 * np.linalg.norm(self.last_action)
-        
-        reward = progress_reward + speed_penalty + action_penalty - 0.05
+        # 🧲 MAGNET REWARD (New!)
+        # Give a small constant "heat" reward for staying inside the target zone
+        magnet_bonus = 0.0
+        if curr_dist < 0.02: # Inside 20mm
+            magnet_bonus = 0.5 
+        if curr_dist < 0.005: # Inside 5mm
+            magnet_bonus = 1.0
+
+        reward = progress + speed_penalty + magnet_bonus - 0.05
         
         terminated = bool(curr_dist < 0.001)
         if terminated:
@@ -209,7 +198,6 @@ class PrecisionLRScheduler(BaseCallback):
             
             print(f"STATUS: Step {self.n_calls} | Avg Dist: {avg_dist:.2f}mm | LR: {self.current_lr:.1e}")
             
-            # Simplified Curriculum
             if avg_dist < 2.0: target_lr = 5e-5
             elif avg_dist < 10.0: target_lr = 1e-4
             else: target_lr = 2.5e-4
@@ -229,7 +217,7 @@ def main():
 
     task = Task.init(
         project_name='Mentor Group - Myrthe/Group 1', 
-        task_name='hris_Slow_Descent_V2',
+        task_name='hris_Gearbox_V3',
         output_uri=True 
     )
     task.execute_remotely(queue_name='default', exit_process=True)
@@ -239,7 +227,7 @@ def main():
     checkpoint_callback = CheckpointCallback(
         save_freq=200000, 
         save_path='./checkpoints/',
-        name_prefix='ot2_slow_descent'
+        name_prefix='ot2_gearbox'
     )
 
     model = PPO(
@@ -259,10 +247,10 @@ def main():
     callback_list = CallbackList([PrecisionLRScheduler(check_freq=5000), checkpoint_callback])
     
     try:
-        print("Starting Training (Anti-Speed Mode)...")
+        print("Starting Training (Virtual Gearbox Mode)...")
         model.learn(total_timesteps=10_000_000, callback=callback_list)
-        model.save("final_model_descent")
-        task.upload_artifact("final_model_descent", "final_model_descent.zip")
+        model.save("final_model_gearbox")
+        task.upload_artifact("final_model_gearbox", "final_model_gearbox.zip")
     except Exception as e:
         print(f"Training interrupted: {e}")
         model.save("emergency_recovery_model")
