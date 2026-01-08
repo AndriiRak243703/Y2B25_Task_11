@@ -37,14 +37,13 @@ class PrecisionLRScheduler(BaseCallback):
             
             # --- PHASE 2 CURRICULUM ---
             # Stricter, granular milestones to guide the model to 1mm
-            if avg_dist < 1.0: target_lr = 5e-6
-            elif avg_dist < 2.0: target_lr = 1e-5
-            elif avg_dist < 5.0: target_lr = 2e-5
-            elif avg_dist < 15.0: target_lr = 5e-5
-            elif avg_dist < 30.0: target_lr = 7.5e-5
-            elif avg_dist < 45.0: target_lr = 1e-4
-            elif avg_dist < 60.0: target_lr = 1.75e-4
-            else: target_lr = 2.5e-4
+
+            if avg_dist < 1.0: target_lr = 1e-6    # Deep surgical
+            elif avg_dist < 5.0: target_lr = 5e-6
+            elif avg_dist < 10.0: target_lr = 1e-5 # Tighten the grip sooner
+            elif avg_dist < 20.0: target_lr = 2e-5 # Lock into 2e-5 now since you hit 15mm
+            elif avg_dist < 40.0: target_lr = 5e-5
+            else: target_lr = 1e-4
 
             # MONOTONIC LOCK: LR can only go down, never up
             if target_lr < self.current_lr:
@@ -76,12 +75,15 @@ def main():
         return
 
     print(f"Loading model from {model_path} for Phase 2 Fine-Tuning...")
+    # Load the model
     model = PPO.load(model_path, env=env)
 
-    # 3. APPLY FINE-TUNING OVERRIDES
-    # Drastically reduce entropy (randomness) to stop the 'shaking'
-    model.ent_coef = 0.0001
-    print("Entropy Coefficient reduced to 0.0001 for precision.")
+    # 🛡️ THE LOCK-IN SETTINGS
+    model.ent_coef = 0.00005    # Even less randomness
+    model.clip_range = 0.1      # REDUCED from 0.2: This prevents the "slingshot" updates
+    model.learning_rate = 5e-5  # Force a lower base LR for fine-tuning
+    
+    print("Lock-in mode active: Lower Clip Range and Entropy.")
 
     # 4. CALLBACKS
     checkpoint_callback = CheckpointCallback(

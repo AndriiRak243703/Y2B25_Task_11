@@ -120,20 +120,34 @@ class OT2Env(gym.Env):
     def step(self, action):
         self.steps += 1
         
-        # 🔥 PHASE 2 DAMPENING: Slower speed, tighter floor
-        # This prevents the 20mm->40mm slingshot effect
-        max_vel = np.clip(self.prev_dist * 0.5, 0.0005, 0.05)
-        
+        # 🏎️ THE LOCK-IN: Non-linear velocity scaling
+        # As we get closer, speed drops exponentially, not just linearly.
+        if self.prev_dist < 0.025: # Within 25mm
+            # "Low Gear": Force ultra-slow movements
+            multiplier = 0.2 
+            floor = 0.0001
+        else:
+            multiplier = 0.5
+            floor = 0.0005
+            
+        max_vel = np.clip(self.prev_dist * multiplier, floor, 0.05)
         vel = np.clip(action, -1.0, 1.0) * max_vel
+
         state = self.sim.run([vel], num_steps=5)
         new_pos = np.array(state[next(iter(state))]['pipette_position'], dtype=np.float32)
         new_pos = np.clip(new_pos, self.workspace_low - 0.01, self.workspace_high + 0.01)
         curr_dist = np.linalg.norm(new_pos - self.goal_pos)
 
-        reward = (self.prev_dist - curr_dist) * 500.0
-        reward += 1.0 / (curr_dist + 0.01)
-        reward -= 0.01
+        # ⚖️ REWARD CLAMPING: Prevents the "Slingshot" update shocks
+        progress_reward = (self.prev_dist - curr_dist) * 500.0
         
+        # Use a square root or log for the proximity reward so it doesn't spike to infinity
+        proximity_reward = 1.0 / (curr_dist + 0.01)
+        proximity_reward = np.clip(proximity_reward, 0, 50) # Cap it!
+
+        reward = progress_reward + proximity_reward - 0.01
+        
+        # Success bonus remains the same
         terminated = bool(curr_dist < 0.001)
         if terminated:
             reward += 100.0
