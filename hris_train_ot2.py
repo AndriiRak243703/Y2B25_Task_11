@@ -22,7 +22,7 @@ except ImportError:
     subprocess.check_call([sys.executable, "-m", "pip", "install", "tensorboard"])
 
 # ==========================================
-# 🚀 SIMULATION (Stable & Fast)
+# 🚀 SIMULATION
 # ==========================================
 class Simulation:
     def __init__(self, num_agents, render=False):
@@ -66,11 +66,11 @@ class Simulation:
         return self.get_states()
 
     def run(self, actions, num_steps=5):
+        # ✅ Increased control steps for smoother physics
         for _ in range(num_steps):
             for i, rId in enumerate(self.robotIds):
                 joints = self.robot_joint_info[i]
                 vx, vy, vz = actions[i]
-                # High force to ensure responsiveness
                 p.setJointMotorControl2(rId, joints['x'], p.VELOCITY_CONTROL, targetVelocity=vx, force=500)
                 p.setJointMotorControl2(rId, joints['y'], p.VELOCITY_CONTROL, targetVelocity=vy, force=500)
                 p.setJointMotorControl2(rId, joints['z'], p.VELOCITY_CONTROL, targetVelocity=vz, force=500)
@@ -91,7 +91,7 @@ class Simulation:
         p.disconnect()
 
 # ==========================================
-# 🧠 ENVIRONMENT (The Expanding Circle Strategy)
+# 🧠 ENVIRONMENT (Updated Logic)
 # ==========================================
 class OT2Env(gym.Env):
     def __init__(self, render=False):
@@ -104,19 +104,18 @@ class OT2Env(gym.Env):
         
         self.workspace_low = np.array([-0.1871, -0.1706, 0.1195], dtype=np.float32)
         self.workspace_high = np.array([0.2532, 0.2197, 0.2897], dtype=np.float32)
-        self.workspace_span = self.workspace_high - self.workspace_low
         
         self.goal_pos = np.zeros(3)
         self.steps = 0
         self.prev_dist = 0.0
         self.last_action = np.zeros(3, dtype=np.float32)
-        self.max_vel = 0.2 # Slightly faster max speed for efficiency
+        self.max_vel = 0.2 
 
-        # 🎓 CURRICULUM "LEVEL UP" SYSTEM
-        self.curriculum_radius = 0.005  # Start VERY close: 5mm
-        self.max_radius = 0.35         # Max workspace: 35cm
-        self.success_history = deque(maxlen=50) # Look at last 50 attempts
-        self.success_threshold_mm = 1.0 # The "Bullseye" size
+        # 🎓 CURRICULUM SETUP
+        self.curriculum_radius = 0.010  # ✅ Start at 10mm (gives it breathing room)
+        self.max_radius = 0.35          # Max 35cm
+        self.success_history = deque(maxlen=50)
+        self.success_threshold_mm = 1.0 
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
@@ -126,25 +125,18 @@ class OT2Env(gym.Env):
         # 🚀 LEVEL UP LOGIC
         if len(self.success_history) >= 50:
             success_rate = np.mean(self.success_history)
-            
-            # If we are ace-ing the current level (>90% success)
             if success_rate > 0.90 and self.curriculum_radius < self.max_radius:
-                self.curriculum_radius *= 1.10 # Expand by 10%
+                self.curriculum_radius *= 1.2 # Grow faster once confident
                 self.curriculum_radius = min(self.curriculum_radius, self.max_radius)
-                self.success_history.clear() # Clear history to prove yourself on new level
-                print(f"🚀 LEVEL UP! Expanding Radius to: {self.curriculum_radius*1000:.1f} mm")
+                self.success_history.clear() 
+                print(f"🚀 LEVEL UP! Radius: {self.curriculum_radius*1000:.1f} mm")
 
-        # Reset Robot
         states = self.sim.reset()
         curr_pos = np.array(states[0][0], dtype=np.float32)
         
-        # 🎯 SPAWN GOAL IN CURRENT CIRCLE OF MASTERY
-        # Random direction
+        # 🎯 SPAWN
         random_dir = self.np_random.uniform(-1, 1, size=3)
         random_dir /= np.linalg.norm(random_dir) + 1e-6
-        
-        # Distance is scaled by curriculum
-        # We ensure it's at least 1mm away so there is *some* movement required
         dist = self.np_random.uniform(0.001, self.curriculum_radius)
         
         self.goal_pos = curr_pos + (random_dir * dist)
@@ -155,15 +147,15 @@ class OT2Env(gym.Env):
 
     def _get_obs(self, pos, vel):
         rel_pos = self.goal_pos - pos
-        norm_rel_pos = rel_pos / self.workspace_span 
+        # ✅ INPUT SCALING: Multiply by 10 so 1cm looks like 0.1 to the net, not 0.01
+        scaled_rel_pos = rel_pos * 10.0 
         norm_vel = vel / self.max_vel 
-        return np.concatenate([norm_rel_pos, norm_vel, self.last_action, [self.prev_dist]]).astype(np.float32)
+        return np.concatenate([scaled_rel_pos, norm_vel, self.last_action, [self.prev_dist]]).astype(np.float32)
 
     def step(self, action):
         self.steps += 1
         self.last_action = np.clip(action, -1.0, 1.0).astype(np.float32)
         
-        # Apply velocity
         vel_cmd = self.last_action * self.max_vel
         states = self.sim.run([vel_cmd], num_steps=5)
         
@@ -174,33 +166,43 @@ class OT2Env(gym.Env):
         curr_dist = np.linalg.norm(new_pos - self.goal_pos)
         
         # =======================
-        # 🧠 HYPER-FOCUSED REWARD
+        # 🧠 REWARD LOGIC
         # =======================
         
-        # 1. Distance Reduction (The main driver)
-        # We multiply by 100 to make the numbers meaningful to the neural net
-        progress = (self.prev_dist - curr_dist) * 100.0
+        # 1. Progress (Scaled up for impact)
+        progress = (self.prev_dist - curr_dist) * 1000.0 
         
-        # 2. Precision Incentive
-        # If we are within 5mm, give a "warm" feeling
+        # 2. Precision Incentive (Continuous)
         precision_bonus = 0.0
-        if curr_dist < 0.005:
-            precision_bonus = 0.1
+        if curr_dist < 0.005: precision_bonus = 1.0
 
-        # 3. Time Penalty (Force speed)
-        time_cost = -0.01
-
+        # 3. Penalties
+        time_cost = -0.1
+        
         reward = progress + precision_bonus + time_cost
 
-        # Success Condition
+        # =======================
+        # 🛑 TERMINATION CONDITIONS
+        # =======================
         terminated = bool(curr_dist < (self.success_threshold_mm / 1000.0))
-        truncated = self.steps >= 500 # Shorter episodes to force efficiency
+        truncated = False
+
+        # ✅ THE ELECTRONIC LEASH: 
+        # If you drift > 3x the radius away, you fail immediately.
+        # This prevents the "25mm error on 5mm task" issue.
+        drift_threshold = max(self.curriculum_radius * 3.0, 0.03) # Minimum 3cm leash
+        if curr_dist > drift_threshold:
+            reward -= 10.0 # Heavy penalty for leaving the work area
+            truncated = True # End episode
+            self.success_history.append(0)
+        
+        if self.steps >= 500:
+            truncated = True
+            self.success_history.append(0)
         
         if terminated:
-            reward += 10.0 # Reliable completion bonus
+            reward += 20.0
             self.success_history.append(1)
-        elif truncated:
-            self.success_history.append(0)
 
         self.prev_dist = curr_dist
 
@@ -210,7 +212,7 @@ class OT2Env(gym.Env):
         }
 
 # ==========================================
-# 🧠 LOGGING
+# 🧠 TRAINING
 # ==========================================
 class CurriculumLogger(BaseCallback):
     def __init__(self, check_freq=5000):
@@ -239,15 +241,13 @@ class CurriculumLogger(BaseCallback):
 
 def main():
     th.set_num_threads(4) 
-
-    # Clean previous run
     if os.path.exists("./ppo_ot2_tensorboard/"):
         import shutil
         shutil.rmtree("./ppo_ot2_tensorboard/", ignore_errors=True)
 
     task = Task.init(
         project_name='Mentor Group - Myrthe/Group 1', 
-        task_name='hris_Expanding_Circle_V4',
+        task_name='hris_Expanding_Circle_V5_FIXED',
         output_uri=True 
     )
     task.execute_remotely(queue_name='default', exit_process=True)
@@ -257,19 +257,28 @@ def main():
     checkpoint_callback = CheckpointCallback(
         save_freq=100000, 
         save_path='./checkpoints/',
-        name_prefix='ot2_expanding'
+        name_prefix='ot2_expanding_fixed'
+    )
+
+    # ✅ THE KEY FIX: log_std_init = -2
+    # This sets initial Standard Deviation to exp(-2) ≈ 0.13
+    # The agent will start calm, not twitchy.
+    policy_kwargs = dict(
+        log_std_init=-2.0, 
+        net_arch=[dict(pi=[256, 256], vf=[256, 256])]
     )
 
     model = PPO(
         "MlpPolicy",
         env,
         device="cpu",
+        policy_kwargs=policy_kwargs, # <--- APPLIED HERE
         learning_rate=3e-4, 
         n_steps=2048,
         batch_size=64,      
         n_epochs=10,        
         gamma=0.99,
-        ent_coef=0.0,      # Zero entropy: We want pure exploitation of the curriculum guidance
+        ent_coef=0.005, # Low entropy needed for precision
         verbose=1,
         tensorboard_log="./ppo_ot2_tensorboard/"
     )
@@ -277,10 +286,10 @@ def main():
     callback_list = CallbackList([CurriculumLogger(check_freq=5000), checkpoint_callback])
     
     try:
-        print("Starting Training (Fully Committed Expanding Circle)...")
+        print("Starting Training (Precision Config)...")
         model.learn(total_timesteps=3_000_000, callback=callback_list) 
-        model.save("final_model_expanding")
-        task.upload_artifact("final_model", "final_model_expanding.zip")
+        model.save("final_model_expanding_fixed")
+        task.upload_artifact("final_model", "final_model_expanding_fixed.zip")
     except Exception as e:
         print(f"Training interrupted: {e}")
         model.save("emergency_recovery_model")
