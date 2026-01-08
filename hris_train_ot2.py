@@ -1,196 +1,276 @@
+import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
 import pybullet as p
 import pybullet_data
-import numpy as np
-import time
+import math
+import os
+import gc
+import sys
+import subprocess
+import torch as th  # Import PyTorch to control threads
+from clearml import Task
 from stable_baselines3 import PPO
-from stable_baselines3.common.env_checker import check_env
-from stable_baselines3.common.callbacks import CheckpointCallback
+from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback, CallbackList
+from stable_baselines3.common.vec_env import DummyVecEnv
 
-class RobotEnv(gym.Env):
-    def __init__(self, render=False):
-        super(RobotEnv, self).__init__()
+# Ensure Tensorboard
+try:
+    import tensorboard
+except ImportError:
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "tensorboard"])
+
+# ==========================================
+# 🚀 SIMULATION (HARDCODED HEADLESS MODE)
+# ==========================================
+class Simulation:
+    def __init__(self, num_agents, render=False):
+        # 1. FORCE DIRECT MODE (Physics Only, No Graphics)
+        self.physicsClient = p.connect(p.DIRECT)
         
-        # 1. Setup PyBullet
-        self.render_mode = render
-        if self.render_mode:
-            p.connect(p.GUI)
-        else:
-            p.connect(p.DIRECT)  # High FPS mode for training
-            
         p.setAdditionalSearchPath(pybullet_data.getDataPath())
-        p.setGravity(0, 0, -9.81)
+        p.setGravity(0, 0, -10)
         
-        # 2. Define Action and Observation Spaces
-        # Action: Velocity control for 6 joints (or however many your URDF has)
-        n_actions = 6 
-        self.action_space = spaces.Box(low=-1, high=1, shape=(n_actions,), dtype=np.float32)
+        self.planeId = p.loadURDF("plane.urdf")
+        self.pipette_offset = [0.073, 0.0895, 0.0895]
         
-        # Observation: [Relative_Pos (3), Joint_Angles (6), Joint_Velocities (6)] = 15 dims
-        # Relative pos is usually enough, but joints help with kinematics
-        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(15,), dtype=np.float32)
-        
-        # 3. Robot Settings
-        self.robot_id = None
-        self.ee_link_idx = 6  # CHANGE THIS to your actual end-effector link index
-        self.goal_pos = np.array([0.5, 0.0, 0.5]) # Fixed goal for now, or randomize in reset
-        self.success_threshold = 0.01  # 1cm accuracy
-        self.max_steps = 1000
-        self.current_step = 0
-        self.prev_dist = 0.0
+        self.robotIds = []
+        self.robot_joint_info = []
+        self.create_robots(num_agents)
 
-    def reset(self, seed=None, options=None):
-        super().reset(seed=seed)
-        
-        p.resetSimulation()
-        p.setGravity(0, 0, -9.81)
-        
-        # Load Robot (Replace with your URDF path)
-        plane_id = p.loadURDF("plane.urdf")
-        # Ensure you use the correct path to your robot URDF
-        # If using a standard robot like Kuka:
-        self.robot_id = p.loadURDF("kuka_iiwa/model.urdf", [0, 0, 0], useFixedBase=True)
-        
-        # Randomize Goal (Optional: helps generalization)
-        # self.goal_pos = np.random.uniform([0.3, -0.2, 0.1], [0.6, 0.2, 0.5])
-        
-        # Visual Marker for Goal
-        p.addUserDebugText("X", self.goal_pos, [1, 0, 0], textSize=2)
-        
-        # Reset Joints to rest position
-        num_joints = p.getNumJoints(self.robot_id)
-        for i in range(num_joints):
-            p.resetJointState(self.robot_id, i, 0)
-            
-        self.current_step = 0
-        
-        # Initialize distance tracking
-        current_ee_pos = self._get_ee_pos()
-        self.prev_dist = np.linalg.norm(self.goal_pos - current_ee_pos)
-        
-        return self._get_obs(), {}
+    def create_robots(self, num_agents):
+        spacing = 1.0
+        grid_size = math.ceil(num_agents ** 0.5)
+        count = 0
+        for i in range(grid_size):
+            for j in range(grid_size):
+                if count >= num_agents: break
+                pos = [-spacing * i, -spacing * j, 0.03]
+                robot_id = p.loadURDF("ot_2_simulation_v6.urdf", pos, [0, 0, 0, 1], useFixedBase=True)
+                self.robotIds.append(robot_id)
 
-    def step(self, action):
-        self.current_step += 1
-        
-        # 1. Apply Action (Velocity Control)
-        # Scale action to realistic velocity limits (e.g., 0.5 rad/s)
-        scaled_action = action * 0.5
-        
-        # Assuming first 6 joints are the controllable ones
-        p.setJointMotorControlArray(
-            self.robot_id, 
-            range(6), 
-            p.VELOCITY_CONTROL, 
-            targetVelocities=scaled_action
-        )
-        
-        # Step Simulation
-        p.stepSimulation()
-        if self.render_mode:
-            time.sleep(1./240.)
-            
-        # 2. Observations & Metrics
-        current_ee_pos = self._get_ee_pos()
-        dist = np.linalg.norm(self.goal_pos - current_ee_pos)
-        
-        # 3. REWARD FUNCTION (The Fix)
-        # ----------------------------------------------------------------
-        # Part A: Progress Reward (The main driver)
-        # If (prev - dist) is positive, we moved closer.
-        progress = self.prev_dist - dist
-        reward = progress * 100.0  # Scale up so 1cm progress = 1.0 reward
-        
-        # Part B: Existential Penalty (Force speed)
-        reward -= 0.05
-        
-        # Part C: Success Bonus
-        terminated = False
-        if dist < self.success_threshold:
-            reward += 20.0
-            terminated = True
-            print(f"🎯 Solved! Distance: {dist:.4f}")
-            
-        # Update metric for next step
-        self.prev_dist = dist
-        # ----------------------------------------------------------------
-        
-        # 4. Termination conditions
-        truncated = False
-        if self.current_step >= self.max_steps:
-            truncated = True
-            
-        info = {"distance": dist}
-        
-        return self._get_obs(), reward, terminated, truncated, info
+                joint_name_to_id = {}
+                for joint_index in range(p.getNumJoints(robot_id)):
+                    info = p.getJointInfo(robot_id, joint_index)
+                    name = info[1].decode('utf-8')
+                    joint_name_to_id[name] = joint_index
 
-    def _get_ee_pos(self):
-        state = p.getLinkState(self.robot_id, self.ee_link_idx)
-        return np.array(state[0])
+                self.robot_joint_info.append({
+                    'x': joint_name_to_id['Slider_3'],
+                    'y': joint_name_to_id['Slider_4'],
+                    'z': joint_name_to_id['Slider_5']
+                })
+                count += 1
 
-    def _get_obs(self):
-        # Joint States
-        joint_states = p.getJointStates(self.robot_id, range(6))
-        joint_angles = np.array([x[0] for x in joint_states])
-        joint_vels = np.array([x[1] for x in joint_states])
-        
-        # Relative Position (Goal - Current)
-        ee_pos = self._get_ee_pos()
-        rel_pos = self.goal_pos - ee_pos
-        
-        # Concatenate for full observation
-        return np.concatenate([rel_pos, joint_angles, joint_vels], dtype=np.float32)
+    def reset(self):
+        for idx, rId in enumerate(self.robotIds):
+            joints = self.robot_joint_info[idx]
+            p.resetJointState(rId, joints['x'], 0.0)
+            p.resetJointState(rId, joints['y'], 0.0)
+            p.resetJointState(rId, joints['z'], 0.0)
+        return self.get_states()
+
+    def run(self, actions, num_steps=5):
+        for _ in range(num_steps):
+            for i, rId in enumerate(self.robotIds):
+                joints = self.robot_joint_info[i]
+                vx, vy, vz = actions[i]
+                p.setJointMotorControl2(rId, joints['x'], p.VELOCITY_CONTROL, targetVelocity=vx, force=500)
+                p.setJointMotorControl2(rId, joints['y'], p.VELOCITY_CONTROL, targetVelocity=vy, force=500)
+                p.setJointMotorControl2(rId, joints['z'], p.VELOCITY_CONTROL, targetVelocity=vz, force=800)
+            p.stepSimulation()
+        return self.get_states()
+
+    def get_states(self):
+        states = []
+        for idx, rId in enumerate(self.robotIds):
+            joints = self.robot_joint_info[idx]
+            # Fetch all 3 joints in one go (Fastest method)
+            js = p.getJointStates(rId, [joints['x'], joints['y'], joints['z']])
+            
+            pos = [
+                js[0][0] + self.pipette_offset[0],
+                js[1][0] + self.pipette_offset[1],
+                js[2][0] + self.pipette_offset[2]
+            ]
+            vel = [js[0][1], js[1][1], js[2][1]]
+            states.append((pos, vel))
+        return states
 
     def close(self):
         p.disconnect()
 
 
-if __name__ == "__main__":
-    # 1. Initialize Env
-    # render=False for high FPS training
-    env = RobotEnv(render=False) 
-    
-    # Optional: Check env sanity
-    # check_env(env)
+class OT2Env(gym.Env):
+    def __init__(self, render=False):
+        super().__init__()
+        self.sim = Simulation(num_agents=1, render=render)
+        
+        self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(3,), dtype=np.float32)
+        
+        # ✅ CHANGED: Shape reduced to 10 (Relative Pos (3) + Vel (3) + Action (3) + Dist (1))
+        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(10,), dtype=np.float32)
+        
+        self.workspace_low = np.array([-0.1871, -0.1706, 0.1195], dtype=np.float32)
+        self.workspace_high = np.array([0.2532, 0.2197, 0.2897], dtype=np.float32)
+        self.workspace_span = self.workspace_high - self.workspace_low
+        
+        self.goal_pos = np.zeros(3)
+        self.steps = 0
+        self.prev_dist = 0.0
+        self.last_action = np.zeros(3, dtype=np.float32)
+        self.max_vel = 0.1 
 
-    # 2. Define Model
-    # ent_coef=0.01 prevents premature convergence (the jitter fix)
-    model = PPO(
-        "MlpPolicy", 
-        env, 
-        verbose=1, 
-        tensorboard_log="./ppo_robot_tensorboard/",
-        ent_coef=0.01,
-        learning_rate=3e-4,
-        batch_size=2048,
-        gamma=0.99
+    def reset(self, seed=None, options=None):
+        super().reset(seed=seed)
+        self.steps = 0
+        self.last_action = np.zeros(3, dtype=np.float32)
+        self.goal_pos = self.np_random.uniform(self.workspace_low, self.workspace_high).astype(np.float32)
+        
+        states = self.sim.reset()
+        curr_pos = np.array(states[0][0], dtype=np.float32)
+        curr_pos = np.clip(curr_pos, self.workspace_low, self.workspace_high)
+        
+        self.prev_dist = np.linalg.norm(curr_pos - self.goal_pos)
+        return self._get_obs(curr_pos, np.zeros(3)), {"goal": self.goal_pos}
+
+    def _get_obs(self, pos, vel):
+        # ✅ CHANGED: Relative Position Obs (Translation Invariant)
+        # Instead of Absolute Pos + Goal, we give (Goal - Pos)
+        rel_pos = self.goal_pos - pos
+        norm_rel_pos = rel_pos / self.workspace_span # Normalize by workspace dimensions
+        
+        norm_vel = vel / self.max_vel 
+        
+        # New obs shape: 3 (rel) + 3 (vel) + 3 (action) + 1 (dist) = 10
+        return np.concatenate([norm_rel_pos, norm_vel, self.last_action, [self.prev_dist]]).astype(np.float32)
+
+    def step(self, action):
+        self.steps += 1
+        self.last_action = np.clip(action, -1.0, 1.0).astype(np.float32)
+        
+        # Lock-In Physics
+        # Dynamic velocity scaling is good, keeping it.
+        max_vel_scale = min(0.1, 0.3 * self.prev_dist)
+        vel_cmd = self.last_action * max_vel_scale
+
+        states = self.sim.run([vel_cmd], num_steps=5)
+        new_pos = np.array(states[0][0], dtype=np.float32)
+        new_vel = np.array(states[0][1], dtype=np.float32)
+        
+        new_pos = np.clip(new_pos, self.workspace_low - 0.01, self.workspace_high + 0.01)
+        curr_dist = np.linalg.norm(new_pos - self.goal_pos)
+
+        # ✅ CRITICAL FIX: REWARD FUNCTION
+        # 1. Progress Reward (Delta Distance) - Dominant term
+        progress = (self.prev_dist - curr_dist) * 1000.0
+        
+        # 2. Step Penalty (Time pressure)
+        step_penalty = -0.1
+        
+        # 3. Effort Penalty (Reduce jitter)
+        effort_penalty = -0.05 * np.linalg.norm(self.last_action)
+        
+        reward = progress + step_penalty + effort_penalty
+
+        # 4. Success Bonus
+        terminated = bool(curr_dist < 0.001)
+        if terminated:
+            reward += 50.0  # Big bonus for actually hitting the target
+
+        truncated = self.steps >= 1000
+        self.prev_dist = curr_dist
+
+        return self._get_obs(new_pos, new_vel), float(reward), terminated, truncated, {"distance": curr_dist}
+
+# ==========================================
+# 🧠 TRAINING (CPU OPTIMIZED)
+# ==========================================
+class PrecisionLRScheduler(BaseCallback):
+    def __init__(self, check_freq=5000):
+        super().__init__()
+        self.check_freq = check_freq
+        self.precision_buffer = []
+        self.current_lr = 2.5e-4
+
+    def _on_step(self) -> bool:
+        if self.locals['dones'][0]:
+            dist_mm = self.locals['infos'][0].get('distance', 1.0) * 1000
+            self.precision_buffer.append(dist_mm)
+            if len(self.precision_buffer) > 50:
+                self.precision_buffer.pop(0)
+
+        if self.n_calls % self.check_freq == 0 and self.precision_buffer:
+            avg_dist = np.mean(self.precision_buffer)
+            self.logger.record("trajectory/avg_distance_mm", avg_dist)
+            
+            print(f"STATUS: Step {self.n_calls} | Avg Dist: {avg_dist:.2f}mm | LR: {self.current_lr:.1e}")
+            
+            if avg_dist < 1.0: target_lr = 5e-6
+            elif avg_dist < 2.0: target_lr = 1e-5
+            elif avg_dist < 5.0: target_lr = 2e-5
+            elif avg_dist < 15.0: target_lr = 5e-5
+            elif avg_dist < 30.0: target_lr = 7.5e-5
+            elif avg_dist < 45.0: target_lr = 1e-4
+            elif avg_dist < 60.0: target_lr = 1.75e-4
+            else: target_lr = 2.5e-4
+
+            if target_lr < self.current_lr:
+                self.current_lr = target_lr
+                for param_group in self.model.policy.optimizer.param_groups:
+                    param_group['lr'] = self.current_lr
+                print(f"MILESTONE REACHED: Dropping LR to {self.current_lr:.1e}")
+            
+            self.logger.record("train/learning_rate_dynamic", self.current_lr)
+            gc.collect() 
+            
+        return True
+
+def main():
+    # 2. CPU THREADING OPTIMIZATION
+    th.set_num_threads(4) 
+
+    task = Task.init(
+        project_name='Mentor Group - Myrthe/Group 1', 
+        task_name='hris_Precision_Final_CPU_OPT_REWARD_FIX',
+        output_uri=True 
+    )
+    task.execute_remotely(queue_name='default', exit_process=True)
+    
+    env = DummyVecEnv([lambda: OT2Env(render=False)])
+    
+    checkpoint_callback = CheckpointCallback(
+        save_freq=200000, 
+        save_path='./checkpoints/',
+        name_prefix='ot2_curriculum_v6_fixed'
     )
 
-    # 3. Train
-    print("🚀 Training started... (Press Ctrl+C to stop)")
+    # 3. HYPERPARAMETER TWEAKS
+    model = PPO(
+        "MlpPolicy",
+        env,
+        device="cpu",      
+        learning_rate=2.5e-4,
+        n_steps=2048,
+        batch_size=256,    
+        n_epochs=4,        
+        gamma=0.99, # Slightly reduced gamma for faster credit assignment
+        ent_coef=0.01, # ✅ CHANGED: Increased from 0.001 to 0.01 to force exploration
+        verbose=1,
+        tensorboard_log="./ppo_ot2_tensorboard/"
+    )
+    
+    callback_list = CallbackList([PrecisionLRScheduler(check_freq=5000), checkpoint_callback])
+    
     try:
-        model.learn(total_timesteps=1_000_000)
-    except KeyboardInterrupt:
-        print("Training interrupted. Saving model...")
+        print("Starting Training (CPU Optimized + Reward Fix)...")
+        model.learn(total_timesteps=10_000_000, callback=callback_list)
+        model.save("final_model_v6")
+        task.upload_artifact("final_model_v6", "final_model_v6.zip")
+    except Exception as e:
+        print(f"Training interrupted: {e}")
+        model.save("emergency_recovery_model")
+        task.upload_artifact("crash_model", "emergency_recovery_model.zip")
 
-    # 4. Save
-    model.save("ppo_robot_final")
-    print("✅ Model saved as ppo_robot_final.zip")
-    
-    # 5. Test / Visualize
-    print("👀 Visualizing result...")
-    env.close()
-    
-    # Re-open in GUI mode for viewing
-    test_env = RobotEnv(render=True)
-    model = PPO.load("ppo_robot_final")
-    
-    obs, _ = test_env.reset()
-    for _ in range(1000):
-        action, _ = model.predict(obs, deterministic=True)
-        obs, reward, done, truncated, info = test_env.step(action)
-        if done or truncated:
-            obs, _ = test_env.reset()
-            
-    test_env.close()
+if __name__ == "__main__":
+    main()
