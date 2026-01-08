@@ -5,12 +5,12 @@ from clearml import Task
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback, CallbackList
 from stable_baselines3.common.vec_env import DummyVecEnv
-# Import the NEW wrapper
+# Import the NEW phase 2 wrapper
 from hris_ot2_gym_wrapper_phase2 import OT2Env
 import subprocess
 import sys
 
-# Force installation of Tensorboard if missing
+# Ensure Tensorboard
 try:
     import tensorboard
 except ImportError:
@@ -21,7 +21,7 @@ class PrecisionLRScheduler(BaseCallback):
         super().__init__()
         self.check_freq = check_freq
         self.precision_buffer = []
-        self.current_lr = 2.5e-4  # High Water Mark
+        self.current_lr = 2.5e-4 
 
     def _on_step(self) -> bool:
         if self.locals['dones'][0]:
@@ -30,22 +30,21 @@ class PrecisionLRScheduler(BaseCallback):
             if len(self.precision_buffer) > 50:
                 self.precision_buffer.pop(0)
 
-        # Logic runs periodically to save CPU
+        # Periodic logic
         if self.n_calls % self.check_freq == 0 and self.precision_buffer:
             avg_dist = np.mean(self.precision_buffer)
             self.logger.record("trajectory/avg_distance_mm", avg_dist)
             
-            # --- PHASE 2 CURRICULUM ---
-            # Stricter, granular milestones to guide the model to 1mm
-
-            if avg_dist < 1.0: target_lr = 1e-6    # Deep surgical
-            elif avg_dist < 5.0: target_lr = 5e-6
-            elif avg_dist < 10.0: target_lr = 1e-5 # Tighten the grip sooner
-            elif avg_dist < 20.0: target_lr = 2e-5 # Lock into 2e-5 now since you hit 15mm
-            elif avg_dist < 40.0: target_lr = 5e-5
+            # --- AGGRESSIVE LOCK-IN CURRICULUM ---
+            # Faster drops to tighten the net immediately since we are already fine-tuning
+            if avg_dist < 1.0: target_lr = 1e-6    # 1mm: Deep Surgical
+            elif avg_dist < 5.0: target_lr = 5e-6  # 5mm: Fine Tuning
+            elif avg_dist < 10.0: target_lr = 1e-5 # 10mm: Tighten Grip
+            elif avg_dist < 20.0: target_lr = 2e-5 # 20mm: Lock-in
+            elif avg_dist < 40.0: target_lr = 5e-5 # 40mm: Approach
             else: target_lr = 1e-4
 
-            # MONOTONIC LOCK: LR can only go down, never up
+            # MONOTONIC LOCK
             if target_lr < self.current_lr:
                 self.current_lr = target_lr
                 for param_group in self.model.policy.optimizer.param_groups:
@@ -57,39 +56,38 @@ class PrecisionLRScheduler(BaseCallback):
         return True
 
 def main():
-    # 1. SETUP CLEARML with OUTPUT_URI to ensure files are uploaded
+    # 1. ClearML Init
     task = Task.init(
         project_name='Mentor Group - Myrthe/Group 1', 
-        task_name='hris_Precision_Phase2_FineTuning',
+        task_name='hris_Precision_Phase2_LockIn',
         output_uri=True 
     )
     task.execute_remotely(queue_name='default', exit_process=True)
     
     env = DummyVecEnv([lambda: OT2Env(render=False)])
     
-    # 2. CHECK FOR PREVIOUS MODEL
-    # Ensure 'final_model.zip' is in the root directory (uploaded via git or artifacts)
+    # 2. LOAD EXISTING MODEL
     model_path = "final_model.zip"
     if not os.path.exists(model_path):
         print("ERROR: final_model.zip not found! Cannot start fine-tuning.")
         return
 
-    print(f"Loading model from {model_path} for Phase 2 Fine-Tuning...")
-    # Load the model
+    print(f"Loading model from {model_path} for Phase 2 Lock-In...")
     model = PPO.load(model_path, env=env)
 
-    # 🛡️ THE LOCK-IN SETTINGS
-    model.ent_coef = 0.00005    # Even less randomness
-    model.clip_range = 0.1      # REDUCED from 0.2: This prevents the "slingshot" updates
-    model.learning_rate = 5e-5  # Force a lower base LR for fine-tuning
+    # 3. APPLY LOCK-IN OVERRIDES
+    # Drastic reduction in randomness and update size
+    model.ent_coef = 0.00005     # Virtually zero randomness
+    model.clip_range = 0.1       # Restrict update size to 10% (prevents shock)
+    model.learning_rate = 5e-5   # Start with a conservative base LR
     
-    print("Lock-in mode active: Lower Clip Range and Entropy.")
+    print("Lock-in Settings Applied: Ent=0.00005, Clip=0.1, LR=5e-5")
 
     # 4. CALLBACKS
     checkpoint_callback = CheckpointCallback(
         save_freq=200000, 
         save_path='./checkpoints/',
-        name_prefix='ot2_phase2_model'
+        name_prefix='ot2_phase2_lockin'
     )
     
     callback_list = CallbackList([PrecisionLRScheduler(check_freq=5000), checkpoint_callback])
@@ -98,14 +96,13 @@ def main():
     try:
         # Run for 3 million steps to settle the model into the 1mm target
         model.learn(total_timesteps=5_000_000, callback=callback_list)
-        model.save("phase2_final_model")
-        # Explicit upload just in case
-        task.upload_artifact("phase2_final_model", "phase2_final_model.zip")
-        print("Phase 2 Training Completed Successfully.")
+        model.save("phase2_final_lockin")
+        task.upload_artifact("phase2_final_lockin", "phase2_final_lockin.zip")
+        print("Phase 2 Lock-In Training Completed Successfully.")
     except Exception as e:
         print(f"Phase 2 Failed: {e}")
-        model.save("phase2_crash_model")
-        task.upload_artifact("phase2_crash_model", "phase2_crash_model.zip")
+        model.save("phase2_crash_lockin")
+        task.upload_artifact("phase2_crash_lockin", "phase2_crash_lockin.zip")
 
 if __name__ == "__main__":
     main()

@@ -8,11 +8,11 @@ import pybullet_data
 class Simulation:
     def __init__(self, num_agents, render=True):
         self.render = render
-        # DIRECT mode for high-speed headless training
+        # DIRECT mode for speed
         mode = p.GUI if render else p.DIRECT
         self.physicsClient = p.connect(mode)
         
-        # 🚀 FPS Optimization: Disable all visual overhead
+        # 🚀 FPS Optimization
         p.configureDebugVisualizer(p.COV_ENABLE_GUI, 0)
         p.configureDebugVisualizer(p.COV_ENABLE_SEGMENTATION_MARK_PREVIEW, 0)
         p.configureDebugVisualizer(p.COV_ENABLE_DEPTH_BUFFER_PREVIEW, 0)
@@ -120,11 +120,10 @@ class OT2Env(gym.Env):
     def step(self, action):
         self.steps += 1
         
-        # 🏎️ THE LOCK-IN: Non-linear velocity scaling
-        # As we get closer, speed drops exponentially, not just linearly.
-        if self.prev_dist < 0.025: # Within 25mm
-            # "Low Gear": Force ultra-slow movements
-            multiplier = 0.2 
+        # 🏎️ THE LOCK-IN: Low Gear Mode
+        # If we are close (25mm), drop the speed floor drastically to stop the slingshot
+        if self.prev_dist < 0.025:
+            multiplier = 0.2
             floor = 0.0001
         else:
             multiplier = 0.5
@@ -138,16 +137,14 @@ class OT2Env(gym.Env):
         new_pos = np.clip(new_pos, self.workspace_low - 0.01, self.workspace_high + 0.01)
         curr_dist = np.linalg.norm(new_pos - self.goal_pos)
 
-        # ⚖️ REWARD CLAMPING: Prevents the "Slingshot" update shocks
+        # ⚖️ REWARD CLAMPING: Cap the proximity reward at 50 to prevent gradient explosions
         progress_reward = (self.prev_dist - curr_dist) * 500.0
         
-        # Use a square root or log for the proximity reward so it doesn't spike to infinity
         proximity_reward = 1.0 / (curr_dist + 0.01)
-        proximity_reward = np.clip(proximity_reward, 0, 50) # Cap it!
+        proximity_reward = np.clip(proximity_reward, 0, 50) 
 
         reward = progress_reward + proximity_reward - 0.01
         
-        # Success bonus remains the same
         terminated = bool(curr_dist < 0.001)
         if terminated:
             reward += 100.0
