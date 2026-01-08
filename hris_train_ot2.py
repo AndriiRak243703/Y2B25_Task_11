@@ -5,6 +5,7 @@ import pybullet as p
 import pybullet_data
 import math
 import os
+import gc
 import sys
 import subprocess
 import torch as th
@@ -14,14 +15,14 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback, CallbackList
 from stable_baselines3.common.vec_env import DummyVecEnv
 
-# Ensure Tensorboard
+# Ensure Tensorboard is installed
 try:
     import tensorboard
 except ImportError:
     subprocess.check_call([sys.executable, "-m", "pip", "install", "tensorboard"])
 
 # ==========================================
-# 🚀 SIMULATION (Standard Setup)
+# 🚀 SIMULATION CLASS
 # ==========================================
 class Simulation:
     def __init__(self, num_agents, render=False):
@@ -44,6 +45,7 @@ class Simulation:
             for j in range(grid_size):
                 if count >= num_agents: break
                 pos = [-spacing * i, -spacing * j, 0.03]
+                # Load the OT2 URDF
                 robot_id = p.loadURDF("ot_2_simulation_v6.urdf", pos, [0, 0, 0, 1], useFixedBase=True)
                 self.robotIds.append(robot_id)
                 joint_name_to_id = {}
@@ -51,6 +53,8 @@ class Simulation:
                     info = p.getJointInfo(robot_id, joint_index)
                     name = info[1].decode('utf-8')
                     joint_name_to_id[name] = joint_index
+                
+                # Map the Slider joints
                 self.robot_joint_info.append({
                     'x': joint_name_to_id['Slider_3'],
                     'y': joint_name_to_id['Slider_4'],
@@ -61,17 +65,17 @@ class Simulation:
     def reset(self):
         for idx, rId in enumerate(self.robotIds):
             joints = self.robot_joint_info[idx]
-            # Randomize start slightly to prevent overfitting to (0,0,0)
-            start_x = np.random.uniform(-0.05, 0.05)
-            start_y = np.random.uniform(-0.05, 0.05)
-            start_z = np.random.uniform(-0.05, 0.05)
+            # Small random jitter to prevent overfitting to exact 0,0,0
+            start_x = np.random.uniform(-0.01, 0.01)
+            start_y = np.random.uniform(-0.01, 0.01)
+            start_z = np.random.uniform(-0.01, 0.01)
             p.resetJointState(rId, joints['x'], start_x)
             p.resetJointState(rId, joints['y'], start_y)
             p.resetJointState(rId, joints['z'], start_z)
         return self.get_states()
 
     def run(self, actions, num_steps=10):
-        # Increased steps per action for smoother movement
+        # Run physics for multiple sub-steps to stabilize movement
         for _ in range(num_steps):
             for i, rId in enumerate(self.robotIds):
                 joints = self.robot_joint_info[i]
@@ -80,7 +84,9 @@ class Simulation:
                 p.setJointMotorControl2(rId, joints['y'], p.VELOCITY_CONTROL, targetVelocity=vy, force=500)
                 p.setJointMotorControl2(rId, joints['z'], p.VELOCITY_CONTROL, targetVelocity=vz, force=500)
             p.stepSimulation()
-            if self.render: import time; time.sleep(1./240.)
+            if self.render: 
+                import time
+                time.sleep(1./240.)
         return self.get_states()
 
     def get_states(self):
@@ -88,6 +94,7 @@ class Simulation:
         for idx, rId in enumerate(self.robotIds):
             joints = self.robot_joint_info[idx]
             js = p.getJointStates(rId, [joints['x'], joints['y'], joints['z']])
+            # Calculate Pipette Tip Position
             pos = [js[0][0] + self.pipette_offset[0], js[1][0] + self.pipette_offset[1], js[2][0] + self.pipette_offset[2]]
             vel = [js[0][1], js[1][1], js[2][1]]
             states.append((pos, vel))
@@ -97,7 +104,7 @@ class Simulation:
         p.disconnect()
 
 # ==========================================
-# 🧠 EXPANDING CIRCLE ENVIRONMENT
+# 🧠 ENVIRONMENT CLASS (The Fix)
 # ==========================================
 class OT2ExpandingEnv(gym.Env):
     def __init__(self, render=False):
@@ -105,55 +112,55 @@ class OT2ExpandingEnv(gym.Env):
         self.sim = Simulation(num_agents=1, render=render)
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(3,), dtype=np.float32)
         
-        # Observation: [Rel_Pos(3), Velocity(3)] -> 6 inputs (Simplified)
+        # Obs: [Relative_Position(3), Velocity(3)]
         self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(6,), dtype=np.float32)
         
         self.workspace_low = np.array([-0.1871, -0.1706, 0.1195], dtype=np.float32)
         self.workspace_high = np.array([0.2532, 0.2197, 0.2897], dtype=np.float32)
         
         self.goal_pos = np.zeros(3)
+        self.prev_dist = 0.0
         self.steps = 0
         self.max_vel = 0.25 
 
         # 🎓 CURRICULUM CONFIG
-        self.curriculum_radius = 0.02  # Start at 20mm (2cm) - easier than 10mm
-        self.max_radius = 0.30         # End at 30cm
+        self.curriculum_radius = 0.02  # Start at 20mm
+        self.max_radius = 0.30         # Max 30cm
         self.success_history = deque(maxlen=50)
-        self.success_threshold_mm = 2.0 # 2mm accuracy required
+        self.success_threshold_mm = 2.0 
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         self.steps = 0
 
-        # 🚀 LEVEL UP LOGIC
+        # 🚀 CURRICULUM LEVEL UP
+        # If last 20 episodes had >80% success, expand the circle
         if len(self.success_history) >= 20:
-            success_rate = np.mean(self.success_history)
-            # If 80% successful, expand the circle
-            if success_rate > 0.80 and self.curriculum_radius < self.max_radius:
-                self.curriculum_radius *= 1.1 # Increase radius by 10%
+            if np.mean(self.success_history) > 0.80 and self.curriculum_radius < self.max_radius:
+                self.curriculum_radius *= 1.2
                 self.curriculum_radius = min(self.curriculum_radius, self.max_radius)
-                self.success_history.clear() # Reset history for new level
+                self.success_history.clear()
                 print(f"🚀 EXPANDING! New Radius: {self.curriculum_radius*1000:.1f} mm")
 
         # 1. Reset Robot
         states = self.sim.reset()
         curr_pos = np.array(states[0][0], dtype=np.float32)
 
-        # 2. Spawn Goal RELATIVE to Robot (Expanding Circle)
-        # We pick a random direction, and place the goal exactly 'radius' away
+        # 2. Spawn Goal Relative to Robot
         random_dir = self.np_random.uniform(-1, 1, size=3)
-        random_dir /= np.linalg.norm(random_dir) + 1e-6 # Normalize
+        random_dir /= np.linalg.norm(random_dir) + 1e-6
         
         self.goal_pos = curr_pos + (random_dir * self.curriculum_radius)
-        
-        # Clip goal to ensure it stays in workspace
         self.goal_pos = np.clip(self.goal_pos, self.workspace_low, self.workspace_high).astype(np.float32)
+        
+        # 3. Init previous distance for Delta Reward
+        self.prev_dist = np.linalg.norm(curr_pos - self.goal_pos)
         
         return self._get_obs(curr_pos, np.zeros(3)), {"goal": self.goal_pos}
 
     def _get_obs(self, pos, vel):
         rel_pos = self.goal_pos - pos
-        # Scale inputs so the neural network sees numbers ~1.0 instead of ~0.01
+        # Scale inputs: 1cm = 0.1 input
         return np.concatenate([rel_pos * 10.0, vel * 5.0]).astype(np.float32)
 
     def step(self, action):
@@ -161,52 +168,45 @@ class OT2ExpandingEnv(gym.Env):
         action = np.clip(action, -1.0, 1.0).astype(np.float32)
         
         vel_cmd = action * self.max_vel
-        states = self.sim.run([vel_cmd], num_steps=10) # Run physics
+        states = self.sim.run([vel_cmd], num_steps=10)
         
         new_pos = np.array(states[0][0], dtype=np.float32)
         new_vel = np.array(states[0][1], dtype=np.float32)
         
-        # Calculate Distance
-        dist = np.linalg.norm(new_pos - self.goal_pos)
-        dist_mm = dist * 1000.0
+        curr_dist = np.linalg.norm(new_pos - self.goal_pos)
+        dist_mm = curr_dist * 1000.0
         
         # =======================
-        # 🧠 REWARD FUNCTION
+        # 🧠 DELTA REWARD LOGIC
         # =======================
-        # 1. Distance Penalty (Continuous)
-        # We want to minimize distance. 
-        reward = -dist 
-
-        # 2. Success Bonus
+        # Improvement Reward: Positive if getting closer, Negative if moving away
+        reward = (self.prev_dist - curr_dist) * 100.0
+        
+        # Success Bonus
         terminated = False
         if dist_mm < self.success_threshold_mm:
             terminated = True
-            reward += 10.0 # Big bonus for reaching goal
+            reward += 10.0
             self.success_history.append(1)
         
-        # 3. Time Penalty (encourage speed)
-        reward -= 0.05
-
-        # 4. Workspace Penalty (Don't hit walls)
-        # (This is the "loose" leash - only penalize if hitting limits)
+        # Safety Penalty (only if hitting limits)
         if not (np.all(new_pos > self.workspace_low) and np.all(new_pos < self.workspace_high)):
-            reward -= 1.0
+            reward -= 0.5
 
-        # =======================
-        # 🛑 TERMINATION
-        # =======================
+        self.prev_dist = curr_dist # Update for next step
+
         truncated = False
         if self.steps >= 400:
             truncated = True
-            self.success_history.append(0) # Failed this episode
+            self.success_history.append(0)
             
         return self._get_obs(new_pos, new_vel), float(reward), terminated, truncated, {
-            "distance": dist, 
+            "distance": curr_dist, 
             "radius": self.curriculum_radius
         }
 
 # ==========================================
-# 🧠 TRAINING CALLBACK
+# 📊 LOGGING CALLBACK
 # ==========================================
 class CurriculumLogger(BaseCallback):
     def __init__(self, check_freq=2048):
@@ -221,6 +221,7 @@ class CurriculumLogger(BaseCallback):
             radius_mm = info.get('radius', 0.0) * 1000
             self.dist_buffer.append(dist_mm)
             
+            # Log custom metrics to Tensorboard/ClearML
             self.logger.record("curriculum/radius_mm", radius_mm)
             self.logger.record("curriculum/final_dist_mm", dist_mm)
 
@@ -230,18 +231,22 @@ class CurriculumLogger(BaseCallback):
             print(f"STEP {self.n_calls} | Avg Error: {avg_dist:.2f}mm | Curr Radius: {radius:.1f}mm")
         return True
 
+# ==========================================
+# 🏁 MAIN EXECUTION
+# ==========================================
 def main():
-    # Setup ClearML
+    # 1. ClearML Initialization
     task = Task.init(
         project_name='Mentor Group - Myrthe/Group 1', 
-        task_name='Expanding_Circle_Fixed',
+        task_name='Expanding_Circle_Fixed_V2',
         output_uri=True 
     )
     
+    # 2. Environment Setup
     env = DummyVecEnv([lambda: OT2ExpandingEnv(render=False)])
     
-    # Initialize PPO with a smaller standard deviation (log_std_init=-1)
-    # This helps it not jitter too much at the start
+    # 3. Model Setup (PPO)
+    # log_std_init=-1.0 reduces initial randomness (makes it less jittery)
     model = PPO(
         "MlpPolicy",
         env,
@@ -249,16 +254,21 @@ def main():
         learning_rate=3e-4,
         batch_size=64,
         n_steps=2048,
+        gamma=0.99,
         ent_coef=0.01,
-        policy_kwargs=dict(log_std_init=-1.0),
+        policy_kwargs=dict(log_std_init=-1.0), 
         tensorboard_log="./ppo_ot2_tensorboard/"
     )
     
     callback = CurriculumLogger()
     
-    print("Starting Training (Expanding Circle)...")
-    model.learn(total_timesteps=1_000_000, callback=callback)
-    model.save("final_model_expanding")
+    print("Starting Training (Delta Reward + Expanding Circle)...")
+    try:
+        model.learn(total_timesteps=1_000_000, callback=callback)
+        model.save("final_model_expanding_v2")
+    except KeyboardInterrupt:
+        print("Training interrupted manually. Saving model...")
+        model.save("interrupted_model")
 
 if __name__ == "__main__":
     main()
