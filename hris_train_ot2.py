@@ -62,9 +62,9 @@ class Simulation:
         return np.array(pos), np.array(vel)
 
 # ==========================================
-# 🧠 ENVIRONMENT (With AUTO-BRAKES)
+# 🧠 ENVIRONMENT (Safety Mode)
 # ==========================================
-class OT2AutoBrakeEnv(gym.Env):
+class OT2SafetyEnv(gym.Env):
     def __init__(self, render=False):
         super().__init__()
         self.sim = Simulation(num_agents=1, render=render)
@@ -73,7 +73,10 @@ class OT2AutoBrakeEnv(gym.Env):
         
         self.goal_pos = np.zeros(3)
         self.steps = 0
-        self.max_vel = 0.5 
+        
+        # 🛑 LIMIT 1: GLOBAL SPEED GOVERNOR
+        # 0.1 m/s = 10 cm/s. This is very controlled.
+        self.max_vel = 0.1 
         
         self.curriculum_radius = 0.05
         self.max_radius = 0.30
@@ -83,7 +86,7 @@ class OT2AutoBrakeEnv(gym.Env):
         super().reset(seed=seed)
         self.steps = 0
 
-        # Rapid Expansion: Since braking is solved, we can expand faster
+        # Rapid Expansion (Since we are moving slow and safe, we can expand confidently)
         if len(self.success_history) >= 20 and np.mean(self.success_history) > 0.9:
             self.curriculum_radius = min(self.curriculum_radius * 1.5, self.max_radius)
             self.success_history.clear()
@@ -104,43 +107,38 @@ class OT2AutoBrakeEnv(gym.Env):
     def step(self, action):
         self.steps += 1
         
-        # 1. Get current position BEFORE moving
+        # 1. Calculate Distance
         current_pos, _ = self.sim.get_state()
         dist_to_goal = np.linalg.norm(current_pos - self.goal_pos)
         
-        # ===========================================
-        # 🛑 AUTOMATIC BRAKING SYSTEM (ABS)
-        # ===========================================
-        # Start slowing down at 10cm (0.1m)
-        # Minimum speed multiplier is 0.1 (so it doesn't stop completely)
-        slowdown_radius = 0.10 
-        brake_factor = np.clip(dist_to_goal / slowdown_radius, 0.1, 1.0)
+        # 🛑 LIMIT 2: AGGRESSIVE AUTO-BRAKES
+        # Start braking at 20cm (Huge radius)
+        slowdown_radius = 0.20 
         
-        # Apply the brakes to the action
+        # Minimum speed factor drops to 0.05 (5% of max speed)
+        # This means at the target, it moves at 0.005 m/s (5mm/s) -> Extremely precise.
+        brake_factor = np.clip(dist_to_goal / slowdown_radius, 0.05, 1.0)
+        
+        # Apply Limits
         scaled_action = action * self.max_vel * brake_factor
-        
-        # Run Simulation
         pos, vel = self.sim.run(scaled_action)
         
-        # Calculate new metrics
+        # Metrics
         new_dist = np.linalg.norm(pos - self.goal_pos)
         dist_mm = new_dist * 1000.0
         
-        # =======================
-        # 🧠 REWARD (Simplified)
-        # =======================
-        # We no longer need complex penalties. The code fixes the speed.
-        # Just reward getting closer.
-        reward = -new_dist * 10.0 
+        # Reward
+        reward = -new_dist * 10.0
         
-        # Success Bonus
         terminated = False
         if new_dist < 0.005: # 5mm
             reward += 20.0
             terminated = True
             self.success_history.append(1)
         
-        truncated = self.steps >= 200
+        # 🛑 LIMIT 3: EXTENDED TIME
+        # Since we are moving slowly, we give the robot 1000 steps to finish.
+        truncated = self.steps >= 1000
         if truncated: self.success_history.append(0)
 
         info = {"dist_mm": dist_mm, "radius_mm": self.curriculum_radius * 1000}
@@ -179,29 +177,29 @@ class PerformanceLogger(BaseCallback):
 def main():
     task = Task.init(
         project_name='Mentor Group - Myrthe/Group 1', 
-        task_name='OT2_AutoBrakes_Engineering',
+        task_name='OT2_Safety_Governor',
         output_uri=True 
     )
     
-    env = DummyVecEnv([lambda: OT2AutoBrakeEnv(render=False)])
+    env = DummyVecEnv([lambda: OT2SafetyEnv(render=False)])
     
-    # We can use a higher learning rate again because the environment is safer
+    # Standard PPO settings (Environment is now so safe, standard PPO works fine)
     model = PPO(
         "MlpPolicy", 
         env, 
         verbose=1, 
-        learning_rate=1e-3, 
-        batch_size=64, 
-        n_steps=2048,
-        ent_coef=0.0,
+        learning_rate=3e-4,     
+        n_steps=2048,           
+        batch_size=64,
+        ent_coef=0.01,          
         tensorboard_log="./ppo_logs/"
     )
     
     callback = PerformanceLogger(check_freq=5000)
-    print("Starting Training (With Auto-Brakes)...")
+    print("Starting Training (Safety Governor Mode)...")
     
     model.learn(total_timesteps=1_000_000, callback=callback)
-    model.save("final_model_autobrakes")
+    model.save("final_model_safety_governor")
 
 if __name__ == "__main__":
     main()
