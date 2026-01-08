@@ -9,7 +9,7 @@ from hris_ot2_gym_wrapper import OT2Env
 import subprocess
 import sys
 
-# Force installation at runtime if it's missing
+# Ensure tensorboard is available for SB3 logging
 try:
     import tensorboard
 except ImportError:
@@ -20,79 +20,73 @@ class PrecisionLRScheduler(BaseCallback):
         super().__init__()
         self.check_freq = check_freq
         self.precision_buffer = []
-        self.current_lr = 2.5e-4
+        self.current_lr = 2.5e-4  # The High Water Mark
 
     def _on_step(self) -> bool:
-        """
-        This method is called by the model every single step.
-        To keep FPS high, we must avoid heavy calculations here.
-        """
-        
-        # 1. FAST LOGIC: Only collect data when an episode finishes
-        # This is very cheap/fast and won't hurt FPS.
+        # 1. Collect distance data on episode completion
         if self.locals['dones'][0]:
             dist_mm = self.locals['infos'][0].get('distance', 1.0) * 1000
             self.precision_buffer.append(dist_mm)
             if len(self.precision_buffer) > 50:
                 self.precision_buffer.pop(0)
 
-        # 2. SLOW LOGIC: Only run this once every 'check_freq' (e.g., 5000 steps)
+        # 2. Periodic milestone check (Maintains high FPS)
         if self.n_calls % self.check_freq == 0 and self.precision_buffer:
             avg_dist = np.mean(self.precision_buffer)
             
-            # --- CLEARML CHART PLOTTING ---
-            # This creates the line graph in the "Scalars" tab
+            # Plot the distance chart in ClearML Scalars tab
             self.logger.record("trajectory/avg_distance_mm", avg_dist)
             
-            # --- Dynamic Learning Rate Logic ---
-            if avg_dist < 1.0:
-                new_lr = 5e-6    # 1mm: Surgical precision
-            elif avg_dist < 2.0:
-                new_lr = 1e-5    # 2mm: Fine tuning
-            elif avg_dist < 5.0:
-                new_lr = 2e-5    # 5mm: Slow down
-            elif avg_dist < 15.0:
-                new_lr = 5e-5    # 15mm: Approach
+            # --- The Fully Optimized Precision Curriculum ---
+            if avg_dist < 1.0: 
+                target_lr = 5e-6    # 1mm: Surgical Precision
+            elif avg_dist < 2.0: 
+                target_lr = 1e-5    # 2mm: Fine Tuning
+            elif avg_dist < 5.0: 
+                target_lr = 2e-5    # 5mm: High Precision
+            elif avg_dist < 15.0: 
+                target_lr = 5e-5    # 15mm: Close Range
+            elif avg_dist < 30.0: 
+                target_lr = 7.5e-5  # 30mm: Precision Bridge
             elif avg_dist < 45.0: 
-                new_lr = 1e-4    # 45mm: Stabilization Zone (Prevents shaking)
-            else:
-                new_lr = 2.5e-4  # Exploration
+                target_lr = 1e-4    # 45mm: Stabilization Zone
+            elif avg_dist < 60.0: 
+                target_lr = 1.75e-4 # 60mm: NEW - Early Orientation
+            else: 
+                target_lr = 2.5e-4  # Default: Global Exploration
 
-            # Update Optimizer if LR changed
-            if new_lr != self.current_lr:
-                self.current_lr = new_lr
+            # Monotonic Lock: LR can only go DOWN
+            if target_lr < self.current_lr:
+                self.current_lr = target_lr
                 for param_group in self.model.policy.optimizer.param_groups:
-                    param_group['lr'] = new_lr
-                print(f"Step {self.n_calls} | Avg Dist: {avg_dist:.2f}mm | LR -> {new_lr:.1e}")
+                    param_group['lr'] = self.current_lr
+                print(f"MILESTONE REACHED: Step {self.n_calls} | Dist: {avg_dist:.2f}mm | LR Locked at {self.current_lr:.1e}")
             
-            # Log LR to see correlation with distance
-            self.logger.record("train/learning_rate_dynamic", new_lr)
-
-            # Garbage Collection (Only run this every 5000 steps!)
+            # Log dynamic LR to ClearML
+            self.logger.record("train/learning_rate_dynamic", self.current_lr)
+            
+            # Efficient memory management
             gc.collect() 
             
         return True
 
 def main():
-    # Initialize ClearML Task
-    task = Task.init(project_name='Mentor Group - Myrthe/Group 1', task_name='hris_Precision_Final_Fixed')
+    task = Task.init(project_name='Mentor Group - Myrthe/Group 1', task_name='hris_Precision_Final_Curriculum')
     task.execute_remotely(queue_name='default', exit_process=True)
     
-    # Initialize Environment
     env = DummyVecEnv([lambda: OT2Env(render=False)])
     
-    # Checkpoint Callback: Saves every 200,000 steps to prevent data loss on crash
+    # Save every 200k steps to ensure we don't lose progress on OOM or crash
     checkpoint_callback = CheckpointCallback(
         save_freq=200000, 
         save_path='./checkpoints/',
-        name_prefix='ot2_model_checkpoint'
+        name_prefix='ot2_curriculum_model'
     )
 
-    # Initialize Model
     model = PPO(
         "MlpPolicy",
         env,
-        device="cpu", # CPU is faster for this specific task
+        device="cpu",
         learning_rate=2.5e-4,
         n_steps=2048,
         batch_size=64,
@@ -102,24 +96,17 @@ def main():
         tensorboard_log="./ppo_ot2_tensorboard/"
     )
     
-    # Combined callbacks
     callback_list = CallbackList([PrecisionLRScheduler(check_freq=5000), checkpoint_callback])
     
-    # Train for 5 million steps
     try:
-        print("Starting training...")
+        print("Starting Curriculum Training...")
         model.learn(total_timesteps=10_000_000, callback=callback_list)
-        
-        # Final Save
         model.save("final_model")
         task.upload_artifact("final_model", "final_model.zip")
-        print("Training finished and model saved.")
-        
     except Exception as e:
-        # Emergency save if it crashes
-        print(f"Task failed with error: {e}")
-        model.save("crash_recovery_model")
-        task.upload_artifact("crash_model", "crash_recovery_model.zip")
+        print(f"Training interrupted: {e}")
+        model.save("emergency_recovery_model")
+        task.upload_artifact("crash_model", "emergency_recovery_model.zip")
 
 if __name__ == "__main__":
     main()
