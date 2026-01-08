@@ -22,24 +22,24 @@ class PrecisionLRScheduler(BaseCallback):
         self.precision_buffer = []
         self.current_lr = 2.5e-4
 
-    def _on_step(self) -> bool:
-        # Collect distances when episodes finish
+def _on_step(self) -> bool:
+        # 1. Record distance when episode ends (Fast)
         if self.locals['dones'][0]:
             dist_mm = self.locals['infos'][0].get('distance', 1.0) * 1000
             self.precision_buffer.append(dist_mm)
             if len(self.precision_buffer) > 50:
                 self.precision_buffer.pop(0)
 
-        # Periodic check to adjust LR and Log Data
+        # 2. Heavy Logic (Only runs once every 5000 steps)
         if self.n_calls % self.check_freq == 0 and self.precision_buffer:
             avg_dist = np.mean(self.precision_buffer)
             
-            # --- NEW: This line creates the chart in ClearML --- 
+            # Log to ClearML Chart
             self.logger.record("trajectory/avg_distance_mm", avg_dist)
             
-            # Logic to lower Learning Rate as we get closer
+            # Dynamic LR Adjustment
             if avg_dist < 1.0:
-                new_lr = 5e-6    # Very fine tuning
+                new_lr = 5e-6
             elif avg_dist < 2.0:
                 new_lr = 1e-5
             elif avg_dist < 5.0:
@@ -47,21 +47,21 @@ class PrecisionLRScheduler(BaseCallback):
             elif avg_dist < 15.0:
                 new_lr = 5e-5
             elif avg_dist < 45.0: 
-                new_lr = 1e-4    # Stabilization zone
+                new_lr = 1e-4
             else:
-                new_lr = 2.5e-4  # Exploration
+                new_lr = 2.5e-4
 
             if new_lr != self.current_lr:
                 self.current_lr = new_lr
                 for param_group in self.model.policy.optimizer.param_groups:
                     param_group['lr'] = new_lr
                 print(f"Step {self.n_calls} | Avg Dist: {avg_dist:.2f}mm | LR → {new_lr:.1e}")
-            
-            # Log the dynamic LR as well so you can correlate it with distance
-            self.logger.record("train/learning_rate_dynamic", new_lr)
 
-            # Memory Management
-            gc.collect() 
+            self.logger.record("train/learning_rate_dynamic", new_lr)
+            
+            # Garbage collect ONLY here
+            gc.collect()
+            
         return True
 
 def main():
