@@ -23,16 +23,21 @@ class PrecisionLRScheduler(BaseCallback):
         self.current_lr = 2.5e-4
 
     def _on_step(self) -> bool:
+        # Collect distances when episodes finish
         if self.locals['dones'][0]:
             dist_mm = self.locals['infos'][0].get('distance', 1.0) * 1000
             self.precision_buffer.append(dist_mm)
             if len(self.precision_buffer) > 50:
                 self.precision_buffer.pop(0)
 
+        # Periodic check to adjust LR and Log Data
         if self.n_calls % self.check_freq == 0 and self.precision_buffer:
             avg_dist = np.mean(self.precision_buffer)
             
-            # --- UPDATED: Earlier slowdown to prevent shaking around 40mm ---
+            # --- NEW: This line creates the chart in ClearML --- 
+            self.logger.record("trajectory/avg_distance_mm", avg_dist)
+            
+            # Logic to lower Learning Rate as we get closer
             if avg_dist < 1.0:
                 new_lr = 5e-6    # Very fine tuning
             elif avg_dist < 2.0:
@@ -41,10 +46,10 @@ class PrecisionLRScheduler(BaseCallback):
                 new_lr = 2e-5
             elif avg_dist < 15.0:
                 new_lr = 5e-5
-            elif avg_dist < 45.0: # New "Stabilization" zone
-                new_lr = 1e-4    # Cut LR here to stop the "shaking"
+            elif avg_dist < 45.0: 
+                new_lr = 1e-4    # Stabilization zone
             else:
-                new_lr = 2.5e-4  # Default exploration
+                new_lr = 2.5e-4  # Exploration
 
             if new_lr != self.current_lr:
                 self.current_lr = new_lr
@@ -52,7 +57,10 @@ class PrecisionLRScheduler(BaseCallback):
                     param_group['lr'] = new_lr
                 print(f"Step {self.n_calls} | Avg Dist: {avg_dist:.2f}mm | LR → {new_lr:.1e}")
             
-            # Memory Management to prevent Exit Code 137
+            # Log the dynamic LR as well so you can correlate it with distance
+            self.logger.record("train/learning_rate_dynamic", new_lr)
+
+            # Memory Management
             gc.collect() 
         return True
 
@@ -63,8 +71,7 @@ def main():
     
     env = DummyVecEnv([lambda: OT2Env(render=False)])
     
-    # 1. ADDED: Checkpoint Callback to prevent data loss
-    # Saves locally and ClearML will automatically sync files in the project folder
+    # Checkpoint Callback: Saves every 200k steps
     checkpoint_callback = CheckpointCallback(
         save_freq=200000, 
         save_path='./checkpoints/',
@@ -74,7 +81,7 @@ def main():
     model = PPO(
         "MlpPolicy",
         env,
-        device="cpu", # Kept on CPU as requested
+        device="cpu", 
         learning_rate=2.5e-4,
         n_steps=2048,
         batch_size=64,
@@ -89,7 +96,7 @@ def main():
     
     # Train for 5 million steps
     try:
-        model.learn(total_timesteps=5_000_000, callback=callback_list)
+        model.learn(total_timesteps=10_000_000, callback=callback_list)
         model.save("final_model")
         task.upload_artifact("final_model", "final_model.zip")
     except Exception as e:
