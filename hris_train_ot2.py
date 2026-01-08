@@ -21,7 +21,7 @@ except ImportError:
     subprocess.check_call([sys.executable, "-m", "pip", "install", "tensorboard"])
 
 # ==========================================
-# 🚀 SIMULATION (Standard Physics)
+# 🚀 SIMULATION (Stable Physics Configuration)
 # ==========================================
 class Simulation:
     def __init__(self, num_agents, render=False):
@@ -69,7 +69,7 @@ class Simulation:
             for i, rId in enumerate(self.robotIds):
                 joints = self.robot_joint_info[i]
                 vx, vy, vz = actions[i]
-                # Standard forces - we control the behavior via Reward, not physics limits
+                # Keeps the stable force values from your successful run
                 p.setJointMotorControl2(rId, joints['x'], p.VELOCITY_CONTROL, targetVelocity=vx, force=200)
                 p.setJointMotorControl2(rId, joints['y'], p.VELOCITY_CONTROL, targetVelocity=vy, force=200)
                 p.setJointMotorControl2(rId, joints['z'], p.VELOCITY_CONTROL, targetVelocity=vz, force=300)
@@ -106,10 +106,9 @@ class OT2Env(gym.Env):
         self.last_action = np.zeros(3, dtype=np.float32)
         self.max_vel = 0.1
 
-        # 🎓 CURRICULUM VARIABLES
-        # We start with a small radius (5cm) and expand it as the agent learns.
+        # 🎓 CURRICULUM CONFIG
         self.curriculum_radius = 0.05 
-        self.max_radius = 0.30        # Max distance ~30cm
+        self.max_radius = 0.30       
         self.success_count = 0
 
     def reset(self, seed=None, options=None):
@@ -117,13 +116,10 @@ class OT2Env(gym.Env):
         self.steps = 0
         self.last_action = np.zeros(3, dtype=np.float32)
         
-        # Reset Robot
         states = self.sim.reset()
         curr_pos = np.array(states[0][0], dtype=np.float32)
         
-        # 🎓 CURRICULUM SPAWN
-        # Instead of spawning goal anywhere, we spawn it close to the robot
-        # This forces the agent to practice "landing" immediately.
+        # Spawn goal within the current curriculum radius
         random_dir = self.np_random.uniform(-1, 1, size=3)
         random_dir /= np.linalg.norm(random_dir) + 1e-6
         random_dist = self.np_random.uniform(0.01, self.curriculum_radius)
@@ -144,8 +140,9 @@ class OT2Env(gym.Env):
         self.steps += 1
         self.last_action = np.clip(action, -1.0, 1.0).astype(np.float32)
         
-        # Dynamic velocity scaling (The "Gearbox")
-        dist_factor = np.clip(self.prev_dist / 0.1, 0.1, 1.0)
+        # ⚙️ RELAXED GEARBOX
+        # We clip at 0.2 instead of 0.1 so it doesn't freeze when close
+        dist_factor = np.clip(self.prev_dist / 0.05, 0.2, 1.0) 
         vel_cmd = self.last_action * self.max_vel * dist_factor
 
         states = self.sim.run([vel_cmd], num_steps=5)
@@ -155,38 +152,39 @@ class OT2Env(gym.Env):
         curr_dist = np.linalg.norm(new_pos - self.goal_pos)
 
         # =======================
-        # 🧠 LOGARITHMIC REWARD
+        # 🧠 REWARD LOGIC
         # =======================
-        # This is the key. 
-        # Moving 100mm->50mm is log(100/50) = 0.69
-        # Moving 2mm->1mm    is log(2/1)    = 0.69
-        # The agent values the last millimeter as much as the first 5 centimeters.
-        
-        # Add epsilon to prevent log(0)
         safe_old = self.prev_dist + 1e-5
         safe_new = curr_dist + 1e-5
         
-        # Calculate log difference
-        # We multiply by 10 to give it a healthy magnitude
+        # 1. Logarithmic Progress
         log_progress = (math.log(safe_old) - math.log(safe_new)) * 10.0
         
-        # Action penalty (prevent jitter)
-        action_cost = -0.05 * np.linalg.norm(self.last_action)
+        # 2. 🧲 Magnet Rewards (To break the 19mm floor)
+        magnet_bonus = 0.0
+        if curr_dist < 0.020: magnet_bonus += 0.2  # Entered 20mm
+        if curr_dist < 0.010: magnet_bonus += 0.3  # Entered 10mm
+        if curr_dist < 0.005: magnet_bonus += 0.5  # Entered 5mm
         
-        # Time penalty
+        # 3. Penalties
+        action_cost = -0.02 * np.linalg.norm(self.last_action)
         time_cost = -0.05
         
-        reward = log_progress + action_cost + time_cost
+        reward = log_progress + magnet_bonus + action_cost + time_cost
 
-        # Success Handling
-        terminated = bool(curr_dist < 0.001)
-        if terminated:
-            reward += 20.0 # Moderate bonus (progress is the main driver)
-            
-            # 🎓 EXPAND CURRICULUM
-            # If we succeed, we make the next episode slightly harder
+        # =======================
+        # 🎓 CURRICULUM LOGIC
+        # =======================
+        terminated = bool(curr_dist < 0.001) # Hard Success
+        
+        # Soft Success (Promote curriculum even if we just get close)
+        if curr_dist < 0.005: 
+            reward += 10.0 # Bonus for "Good Enough"
             if self.curriculum_radius < self.max_radius:
-                self.curriculum_radius += 0.002 # Grow radius by 2mm per success
+                self.curriculum_radius += 0.005 # Expand radius
+        
+        if terminated:
+            reward += 50.0 # Bonus for "Perfect"
                 
         truncated = self.steps >= 1000
         self.prev_dist = curr_dist
@@ -211,7 +209,7 @@ class CurriculumLogger(BaseCallback):
             self.dist_buffer.append(dist_mm)
             if len(self.dist_buffer) > 50: self.dist_buffer.pop(0)
             
-            # Log the curriculum growth
+            # Log radius to track expansion
             self.logger.record("curriculum/radius_mm", radius_mm)
 
         if self.n_calls % self.check_freq == 0 and self.dist_buffer:
@@ -226,7 +224,7 @@ def main():
 
     task = Task.init(
         project_name='Mentor Group - Myrthe/Group 1', 
-        task_name='hris_Log_Curriculum_Final',
+        task_name='hris_Magnet_Curriculum_Fix',
         output_uri=True 
     )
     task.execute_remotely(queue_name='default', exit_process=True)
@@ -236,14 +234,14 @@ def main():
     checkpoint_callback = CheckpointCallback(
         save_freq=200000, 
         save_path='./checkpoints/',
-        name_prefix='ot2_log_curr'
+        name_prefix='ot2_magnet'
     )
 
     model = PPO(
         "MlpPolicy",
         env,
         device="cpu",      
-        learning_rate=3e-4, # Standard LR is fine with Log reward
+        learning_rate=3e-4, 
         n_steps=2048,
         batch_size=256,    
         n_epochs=4,        
@@ -256,10 +254,10 @@ def main():
     callback_list = CallbackList([CurriculumLogger(check_freq=5000), checkpoint_callback])
     
     try:
-        print("Starting Training (Logarithmic Reward + Curriculum)...")
+        print("Starting Training (Magnet Zones + Forgiving Curriculum)...")
         model.learn(total_timesteps=10_000_000, callback=callback_list)
-        model.save("final_model_log_curriculum")
-        task.upload_artifact("final_model", "final_model_log_curriculum.zip")
+        model.save("final_model_magnet")
+        task.upload_artifact("final_model", "final_model_magnet.zip")
     except Exception as e:
         print(f"Training interrupted: {e}")
         model.save("emergency_recovery_model")
