@@ -69,7 +69,7 @@ class Simulation:
             for i, rId in enumerate(self.robotIds):
                 joints = self.robot_joint_info[i]
                 vx, vy, vz = actions[i]
-                # Keeps the stable force values from your successful run
+                # Stable forces
                 p.setJointMotorControl2(rId, joints['x'], p.VELOCITY_CONTROL, targetVelocity=vx, force=200)
                 p.setJointMotorControl2(rId, joints['y'], p.VELOCITY_CONTROL, targetVelocity=vy, force=200)
                 p.setJointMotorControl2(rId, joints['z'], p.VELOCITY_CONTROL, targetVelocity=vz, force=300)
@@ -107,9 +107,9 @@ class OT2Env(gym.Env):
         self.max_vel = 0.1
 
         # 🎓 CURRICULUM CONFIG
-        self.curriculum_radius = 0.05 
+        # Since we already mastered 300mm, we start wide but keep the success metric tough.
+        self.curriculum_radius = 0.30 
         self.max_radius = 0.30       
-        self.success_count = 0
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
@@ -119,7 +119,6 @@ class OT2Env(gym.Env):
         states = self.sim.reset()
         curr_pos = np.array(states[0][0], dtype=np.float32)
         
-        # Spawn goal within the current curriculum radius
         random_dir = self.np_random.uniform(-1, 1, size=3)
         random_dir /= np.linalg.norm(random_dir) + 1e-6
         random_dist = self.np_random.uniform(0.01, self.curriculum_radius)
@@ -140,8 +139,7 @@ class OT2Env(gym.Env):
         self.steps += 1
         self.last_action = np.clip(action, -1.0, 1.0).astype(np.float32)
         
-        # ⚙️ RELAXED GEARBOX
-        # We clip at 0.2 instead of 0.1 so it doesn't freeze when close
+        # ⚙️ GEARBOX
         dist_factor = np.clip(self.prev_dist / 0.05, 0.2, 1.0) 
         vel_cmd = self.last_action * self.max_vel * dist_factor
 
@@ -152,19 +150,23 @@ class OT2Env(gym.Env):
         curr_dist = np.linalg.norm(new_pos - self.goal_pos)
 
         # =======================
-        # 🧠 REWARD LOGIC
+        # 🧠 SHARPENED REWARD LOGIC
         # =======================
         safe_old = self.prev_dist + 1e-5
         safe_new = curr_dist + 1e-5
         
-        # 1. Logarithmic Progress
-        log_progress = (math.log(safe_old) - math.log(safe_new)) * 10.0
+        # 1. Sensitivity Boost for Close Range
+        log_multiplier = 10.0
+        if curr_dist < 0.030: # If closer than 3cm
+             log_multiplier = 30.0 # TRIPLE sensitivity to progress
         
-        # 2. 🧲 Magnet Rewards (To break the 19mm floor)
+        log_progress = (math.log(safe_old) - math.log(safe_new)) * log_multiplier
+        
+        # 2. 🧲 Super Magnet Rewards (Doubled Values)
         magnet_bonus = 0.0
-        if curr_dist < 0.020: magnet_bonus += 0.2  # Entered 20mm
-        if curr_dist < 0.010: magnet_bonus += 0.3  # Entered 10mm
-        if curr_dist < 0.005: magnet_bonus += 0.5  # Entered 5mm
+        if curr_dist < 0.020: magnet_bonus += 0.5  
+        if curr_dist < 0.010: magnet_bonus += 1.0  
+        if curr_dist < 0.005: magnet_bonus += 2.0  
         
         # 3. Penalties
         action_cost = -0.02 * np.linalg.norm(self.last_action)
@@ -172,19 +174,10 @@ class OT2Env(gym.Env):
         
         reward = log_progress + magnet_bonus + action_cost + time_cost
 
-        # =======================
-        # 🎓 CURRICULUM LOGIC
-        # =======================
-        terminated = bool(curr_dist < 0.001) # Hard Success
-        
-        # Soft Success (Promote curriculum even if we just get close)
-        if curr_dist < 0.005: 
-            reward += 10.0 # Bonus for "Good Enough"
-            if self.curriculum_radius < self.max_radius:
-                self.curriculum_radius += 0.005 # Expand radius
-        
+        # Success Logic
+        terminated = bool(curr_dist < 0.001)
         if terminated:
-            reward += 50.0 # Bonus for "Perfect"
+            reward += 100.0 # Grand Prize
                 
         truncated = self.steps >= 1000
         self.prev_dist = curr_dist
@@ -209,7 +202,6 @@ class CurriculumLogger(BaseCallback):
             self.dist_buffer.append(dist_mm)
             if len(self.dist_buffer) > 50: self.dist_buffer.pop(0)
             
-            # Log radius to track expansion
             self.logger.record("curriculum/radius_mm", radius_mm)
 
         if self.n_calls % self.check_freq == 0 and self.dist_buffer:
@@ -224,7 +216,7 @@ def main():
 
     task = Task.init(
         project_name='Mentor Group - Myrthe/Group 1', 
-        task_name='hris_Magnet_Curriculum_Fix',
+        task_name='hris_Precision_Refinement_V2',
         output_uri=True 
     )
     task.execute_remotely(queue_name='default', exit_process=True)
@@ -234,19 +226,19 @@ def main():
     checkpoint_callback = CheckpointCallback(
         save_freq=200000, 
         save_path='./checkpoints/',
-        name_prefix='ot2_magnet'
+        name_prefix='ot2_precision'
     )
 
     model = PPO(
         "MlpPolicy",
         env,
         device="cpu",      
-        learning_rate=3e-4, 
+        learning_rate=1e-4, # ✅ Reduced LR for fine-tuning
         n_steps=2048,
         batch_size=256,    
-        n_epochs=4,        
+        n_epochs=10,        # ✅ Increased epochs for better sample efficiency
         gamma=0.99,
-        ent_coef=0.01,
+        ent_coef=0.001,     # ✅ Reduced Entropy to stabilize jitter
         verbose=1,
         tensorboard_log="./ppo_ot2_tensorboard/"
     )
@@ -254,10 +246,10 @@ def main():
     callback_list = CallbackList([CurriculumLogger(check_freq=5000), checkpoint_callback])
     
     try:
-        print("Starting Training (Magnet Zones + Forgiving Curriculum)...")
+        print("Starting Training (Precision Refinement Mode)...")
         model.learn(total_timesteps=10_000_000, callback=callback_list)
-        model.save("final_model_magnet")
-        task.upload_artifact("final_model", "final_model_magnet.zip")
+        model.save("final_model_precision")
+        task.upload_artifact("final_model", "final_model_precision.zip")
     except Exception as e:
         print(f"Training interrupted: {e}")
         model.save("emergency_recovery_model")
