@@ -8,7 +8,7 @@ import os
 import gc
 import sys
 import subprocess
-import torch as th  # Import PyTorch to control threads
+import torch as th
 from clearml import Task
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback, CallbackList
@@ -21,11 +21,10 @@ except ImportError:
     subprocess.check_call([sys.executable, "-m", "pip", "install", "tensorboard"])
 
 # ==========================================
-# 🚀 SIMULATION (HARDCODED HEADLESS MODE)
+# 🚀 SIMULATION (LOWER FORCE / SLOWER PHYSICS)
 # ==========================================
 class Simulation:
     def __init__(self, num_agents, render=False):
-        # 1. FORCE DIRECT MODE (Physics Only, No Graphics)
         self.physicsClient = p.connect(p.DIRECT)
         
         p.setAdditionalSearchPath(pybullet_data.getDataPath())
@@ -75,9 +74,11 @@ class Simulation:
             for i, rId in enumerate(self.robotIds):
                 joints = self.robot_joint_info[i]
                 vx, vy, vz = actions[i]
-                p.setJointMotorControl2(rId, joints['x'], p.VELOCITY_CONTROL, targetVelocity=vx, force=500)
-                p.setJointMotorControl2(rId, joints['y'], p.VELOCITY_CONTROL, targetVelocity=vy, force=500)
-                p.setJointMotorControl2(rId, joints['z'], p.VELOCITY_CONTROL, targetVelocity=vz, force=800)
+                # ✅ CHANGED: Reduced Force from 500/800 to 150/200
+                # This makes the robot less "twitchy" and prevents instant acceleration
+                p.setJointMotorControl2(rId, joints['x'], p.VELOCITY_CONTROL, targetVelocity=vx, force=150)
+                p.setJointMotorControl2(rId, joints['y'], p.VELOCITY_CONTROL, targetVelocity=vy, force=150)
+                p.setJointMotorControl2(rId, joints['z'], p.VELOCITY_CONTROL, targetVelocity=vz, force=200)
             p.stepSimulation()
         return self.get_states()
 
@@ -85,7 +86,6 @@ class Simulation:
         states = []
         for idx, rId in enumerate(self.robotIds):
             joints = self.robot_joint_info[idx]
-            # Fetch all 3 joints in one go (Fastest method)
             js = p.getJointStates(rId, [joints['x'], joints['y'], joints['z']])
             
             pos = [
@@ -107,8 +107,7 @@ class OT2Env(gym.Env):
         self.sim = Simulation(num_agents=1, render=render)
         
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(3,), dtype=np.float32)
-        
-        # ✅ CHANGED: Shape reduced to 10 (Relative Pos (3) + Vel (3) + Action (3) + Dist (1))
+        # 10 Dimensions: RelPos(3) + Vel(3) + Action(3) + Dist(1)
         self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(10,), dtype=np.float32)
         
         self.workspace_low = np.array([-0.1871, -0.1706, 0.1195], dtype=np.float32)
@@ -119,7 +118,9 @@ class OT2Env(gym.Env):
         self.steps = 0
         self.prev_dist = 0.0
         self.last_action = np.zeros(3, dtype=np.float32)
-        self.max_vel = 0.1 
+        
+        # ✅ CHANGED: Reduced Max Velocity globally to 5cm/s
+        self.max_vel = 0.05 
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
@@ -135,24 +136,18 @@ class OT2Env(gym.Env):
         return self._get_obs(curr_pos, np.zeros(3)), {"goal": self.goal_pos}
 
     def _get_obs(self, pos, vel):
-        # ✅ CHANGED: Relative Position Obs (Translation Invariant)
-        # Instead of Absolute Pos + Goal, we give (Goal - Pos)
         rel_pos = self.goal_pos - pos
-        norm_rel_pos = rel_pos / self.workspace_span # Normalize by workspace dimensions
-        
+        norm_rel_pos = rel_pos / self.workspace_span 
         norm_vel = vel / self.max_vel 
-        
-        # New obs shape: 3 (rel) + 3 (vel) + 3 (action) + 1 (dist) = 10
         return np.concatenate([norm_rel_pos, norm_vel, self.last_action, [self.prev_dist]]).astype(np.float32)
 
     def step(self, action):
         self.steps += 1
         self.last_action = np.clip(action, -1.0, 1.0).astype(np.float32)
         
-        # Lock-In Physics
-        # Dynamic velocity scaling is good, keeping it.
-        max_vel_scale = min(0.1, 0.3 * self.prev_dist)
-        vel_cmd = self.last_action * max_vel_scale
+        # ✅ CHANGED: Removed the "min()" dynamic scaling. 
+        # We just apply the hard cap of 0.05. It's slow, but consistent.
+        vel_cmd = self.last_action * self.max_vel
 
         states = self.sim.run([vel_cmd], num_steps=5)
         new_pos = np.array(states[0][0], dtype=np.float32)
@@ -161,22 +156,22 @@ class OT2Env(gym.Env):
         new_pos = np.clip(new_pos, self.workspace_low - 0.01, self.workspace_high + 0.01)
         curr_dist = np.linalg.norm(new_pos - self.goal_pos)
 
-        # ✅ CRITICAL FIX: REWARD FUNCTION
-        # 1. Progress Reward (Delta Distance) - Dominant term
+        # Rewards
+        # 1. Progress (Distance Delta)
         progress = (self.prev_dist - curr_dist) * 1000.0
         
-        # 2. Step Penalty (Time pressure)
-        step_penalty = -0.1
+        # 2. General Speed Penalty (Encourages efficiency/smoothness)
+        speed_penalty = -0.5 * np.linalg.norm(new_vel)
         
-        # 3. Effort Penalty (Reduce jitter)
-        effort_penalty = -0.05 * np.linalg.norm(self.last_action)
+        # 3. Action Penalty (Encourages using less motor power)
+        action_penalty = -0.1 * np.linalg.norm(self.last_action)
         
-        reward = progress + step_penalty + effort_penalty
-
         # 4. Success Bonus
+        reward = progress + speed_penalty + action_penalty - 0.05
+        
         terminated = bool(curr_dist < 0.001)
         if terminated:
-            reward += 50.0  # Big bonus for actually hitting the target
+            reward += 100.0
 
         truncated = self.steps >= 1000
         self.prev_dist = curr_dist
@@ -184,7 +179,7 @@ class OT2Env(gym.Env):
         return self._get_obs(new_pos, new_vel), float(reward), terminated, truncated, {"distance": curr_dist}
 
 # ==========================================
-# 🧠 TRAINING (CPU OPTIMIZED)
+# 🧠 TRAINING (STABILIZED)
 # ==========================================
 class PrecisionLRScheduler(BaseCallback):
     def __init__(self, check_freq=5000):
@@ -206,13 +201,10 @@ class PrecisionLRScheduler(BaseCallback):
             
             print(f"STATUS: Step {self.n_calls} | Avg Dist: {avg_dist:.2f}mm | LR: {self.current_lr:.1e}")
             
-            if avg_dist < 1.0: target_lr = 5e-6
-            elif avg_dist < 2.0: target_lr = 1e-5
-            elif avg_dist < 5.0: target_lr = 2e-5
-            elif avg_dist < 15.0: target_lr = 5e-5
-            elif avg_dist < 30.0: target_lr = 7.5e-5
-            elif avg_dist < 45.0: target_lr = 1e-4
-            elif avg_dist < 60.0: target_lr = 1.75e-4
+            # Simplified Logic for the Slower Physics
+            if avg_dist < 1.0: target_lr = 1e-5
+            elif avg_dist < 5.0: target_lr = 5e-5
+            elif avg_dist < 20.0: target_lr = 1e-4
             else: target_lr = 2.5e-4
 
             if target_lr < self.current_lr:
@@ -223,16 +215,14 @@ class PrecisionLRScheduler(BaseCallback):
             
             self.logger.record("train/learning_rate_dynamic", self.current_lr)
             gc.collect() 
-            
         return True
 
 def main():
-    # 2. CPU THREADING OPTIMIZATION
     th.set_num_threads(4) 
 
     task = Task.init(
         project_name='Mentor Group - Myrthe/Group 1', 
-        task_name='hris_Precision_Final_CPU_OPT_REWARD_FIX',
+        task_name='hris_Slow_Crawl_V1',
         output_uri=True 
     )
     task.execute_remotely(queue_name='default', exit_process=True)
@@ -242,10 +232,9 @@ def main():
     checkpoint_callback = CheckpointCallback(
         save_freq=200000, 
         save_path='./checkpoints/',
-        name_prefix='ot2_curriculum_v6_fixed'
+        name_prefix='ot2_slow_crawl'
     )
 
-    # 3. HYPERPARAMETER TWEAKS
     model = PPO(
         "MlpPolicy",
         env,
@@ -254,8 +243,9 @@ def main():
         n_steps=2048,
         batch_size=256,    
         n_epochs=4,        
-        gamma=0.99, # Slightly reduced gamma for faster credit assignment
-        ent_coef=0.01, # ✅ CHANGED: Increased from 0.001 to 0.01 to force exploration
+        gamma=0.99, 
+        clip_range=0.1,    # ✅ CHANGED: Tight clip range to prevent jumping
+        ent_coef=0.01,     # High exploration to find the goal initially
         verbose=1,
         tensorboard_log="./ppo_ot2_tensorboard/"
     )
@@ -263,10 +253,10 @@ def main():
     callback_list = CallbackList([PrecisionLRScheduler(check_freq=5000), checkpoint_callback])
     
     try:
-        print("Starting Training (CPU Optimized + Reward Fix)...")
+        print("Starting Training (Slow & Steady Mode)...")
         model.learn(total_timesteps=10_000_000, callback=callback_list)
-        model.save("final_model_v6")
-        task.upload_artifact("final_model_v6", "final_model_v6.zip")
+        model.save("final_model_slow")
+        task.upload_artifact("final_model_slow", "final_model_slow.zip")
     except Exception as e:
         print(f"Training interrupted: {e}")
         model.save("emergency_recovery_model")
