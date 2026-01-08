@@ -5,7 +5,7 @@ from clearml import Task
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback, CallbackList
 from stable_baselines3.common.vec_env import DummyVecEnv
-# Import the NEW phase 2 wrapper
+# Import the wrapper
 from hris_ot2_gym_wrapper_phase2 import OT2Env
 import subprocess
 import sys
@@ -21,7 +21,8 @@ class PrecisionLRScheduler(BaseCallback):
         super().__init__()
         self.check_freq = check_freq
         self.precision_buffer = []
-        self.current_lr = 2.5e-4 
+        # FIX: Start at the Phase 2 base LR, not the Phase 1 high LR
+        self.current_lr = 5e-5 
 
     def _on_step(self) -> bool:
         if self.locals['dones'][0]:
@@ -30,13 +31,11 @@ class PrecisionLRScheduler(BaseCallback):
             if len(self.precision_buffer) > 50:
                 self.precision_buffer.pop(0)
 
-        # Periodic logic
         if self.n_calls % self.check_freq == 0 and self.precision_buffer:
             avg_dist = np.mean(self.precision_buffer)
             self.logger.record("trajectory/avg_distance_mm", avg_dist)
             
             # --- AGGRESSIVE LOCK-IN CURRICULUM ---
-            # Faster drops to tighten the net immediately since we are already fine-tuning
             if avg_dist < 1.0: target_lr = 1e-6    # 1mm: Deep Surgical
             elif avg_dist < 5.0: target_lr = 5e-6  # 5mm: Fine Tuning
             elif avg_dist < 10.0: target_lr = 1e-5 # 10mm: Tighten Grip
@@ -56,7 +55,6 @@ class PrecisionLRScheduler(BaseCallback):
         return True
 
 def main():
-    # 1. ClearML Init
     task = Task.init(
         project_name='Mentor Group - Myrthe/Group 1', 
         task_name='hris_Precision_Phase2_LockIn',
@@ -66,7 +64,6 @@ def main():
     
     env = DummyVecEnv([lambda: OT2Env(render=False)])
     
-    # 2. LOAD EXISTING MODEL
     model_path = "final_model.zip"
     if not os.path.exists(model_path):
         print("ERROR: final_model.zip not found! Cannot start fine-tuning.")
@@ -75,15 +72,18 @@ def main():
     print(f"Loading model from {model_path} for Phase 2 Lock-In...")
     model = PPO.load(model_path, env=env)
 
-    # 3. APPLY LOCK-IN OVERRIDES
-    # Drastic reduction in randomness and update size
-    model.ent_coef = 0.00005     # Virtually zero randomness
-    model.clip_range = 0.1       # Restrict update size to 10% (prevents shock)
-    model.learning_rate = 5e-5   # Start with a conservative base LR
+    # --- FIX: USE LAMBDA FUNCTIONS ---
+    # SB3 expects these to be functions (schedules), not floats
+    model.ent_coef = 0.00005     
+    model.clip_range = lambda _: 0.1       # FIX: Wrapped in lambda
+    model.learning_rate = lambda _: 5e-5   # FIX: Wrapped in lambda
     
+    # Also update the optimizer directly just to be sure
+    for param_group in model.policy.optimizer.param_groups:
+        param_group['lr'] = 5e-5
+
     print("Lock-in Settings Applied: Ent=0.00005, Clip=0.1, LR=5e-5")
 
-    # 4. CALLBACKS
     checkpoint_callback = CheckpointCallback(
         save_freq=200000, 
         save_path='./checkpoints/',
@@ -92,15 +92,16 @@ def main():
     
     callback_list = CallbackList([PrecisionLRScheduler(check_freq=5000), checkpoint_callback])
     
-    # 5. TRAIN
     try:
-        # Run for 3 million steps to settle the model into the 1mm target
-        model.learn(total_timesteps=5_000_000, callback=callback_list)
+        model.learn(total_timesteps=3_000_000, callback=callback_list)
         model.save("phase2_final_lockin")
         task.upload_artifact("phase2_final_lockin", "phase2_final_lockin.zip")
         print("Phase 2 Lock-In Training Completed Successfully.")
     except Exception as e:
         print(f"Phase 2 Failed: {e}")
+        # Print full traceback to help debug if it happens again
+        import traceback
+        traceback.print_exc()
         model.save("phase2_crash_lockin")
         task.upload_artifact("phase2_crash_lockin", "phase2_crash_lockin.zip")
 
