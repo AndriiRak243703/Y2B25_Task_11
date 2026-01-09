@@ -59,7 +59,7 @@ class OT2Env(gym.Env):
         self.initial_distance = None
 
         # To ensure that agent does not overshoot
-        self.settled_threshold = 10
+        self.settled_threshold = 5
         self.settling_counter = 0
         self.settled = None
     
@@ -125,7 +125,7 @@ class OT2Env(gym.Env):
         distance_to_goal = np.linalg.norm(current_pos - self.goal_position)
         
         # Settling
-        if distance_to_goal < self.target_threshold:
+        if distance_to_goal <= self.target_threshold:
             self.settling_counter += 1
             if self.settling_counter == self.settled_threshold:
                 self.settled = True
@@ -133,7 +133,7 @@ class OT2Env(gym.Env):
             self.settling_counter = 0
 
         # Calculate reward
-        reward = self._calculate_reward(distance_to_goal, velocity)
+        reward = self._calculate_reward(distance_to_goal, velocity, max_velocity)
 
         # Check if goal reached
         terminated = bool(self.settled)
@@ -163,35 +163,28 @@ class OT2Env(gym.Env):
         
         return observation, reward, terminated, truncated, info
     
-    def _calculate_reward(self, distance_to_goal, velocity):
-        """
-        Reward function designed for precise positioning with settling.
-    
-        Components:
-        1. Time penalty: -0.1 per step (encourages efficiency)
-        2. Distance penalty: -10 * distance (encourages approaching goal)
-        3. High velocity penalty: -10 * speed when within 1cm of goal (prevents overshoot)
-        4. Success bonus: +50 only after settling (rewards stable positioning)
+    def _calculate_reward(self, distance_to_goal, velocity, max_velocity):
         
-        Settling requires staying within target threshold for multiple consecutive steps.
-        """
         # Time penalty - punish every step
         time_penalty = -0.1
         
-        # Distance penalty - punish being far from goal
-        distance_penalty = -10.0 * distance_to_goal
+        # Exponential proximity bonus
+        proximity_bonus = 10.0 * np.exp(-distance_to_goal / 0.005)
         
-        # High velocity near the goal penalty - prevents overshoot
+        # Low velocity bonus near goal
         velocity_magnitude = np.linalg.norm(velocity)
         if distance_to_goal < 0.03:
-            high_velocity_penalty = -velocity_magnitude * 5
+            low_velocity_bonus = (max_velocity - velocity_magnitude) * 2.0
         else:
-            high_velocity_penalty = 0.0
+            low_velocity_bonus = 0.0
+
+        # Settling bonus (each step within threshold)
+        settling_bonus = 5.0 if distance_to_goal <= self.target_threshold else 0.0
 
         # Success bonus (only when settled)
         success_bonus = 50.0 if self.settled else 0.0
         
-        reward = time_penalty + distance_penalty + high_velocity_penalty + success_bonus
+        reward = time_penalty + proximity_bonus + low_velocity_bonus + settling_bonus + success_bonus
         
         return float(reward)
     
