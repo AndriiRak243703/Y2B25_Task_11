@@ -46,7 +46,7 @@ class Simulation:
         self.joints = [0, 1, 2] 
 
     def reset(self):
-        start_pos = np.random.uniform(-0.15, 0.15, 3) # Slightly wider workspace
+        start_pos = np.random.uniform(-0.15, 0.15, 3) 
         for i, joint in enumerate(self.joints):
             p.resetJointState(self.robotId, joint, start_pos[i])
         return self.get_state()
@@ -92,7 +92,6 @@ class OT2PrecisionEnv(gym.Env):
         pos, vel = self.sim.reset()
         
         # 🎲 SHOTGUN RESET: Random distance between 1mm and 200mm
-        # This prevents overfitting to one specific speed/distance
         rand_dist = self.np_random.uniform(0.001, 0.20) 
         
         random_dir = self.np_random.uniform(-1, 1, size=3)
@@ -114,7 +113,7 @@ class OT2PrecisionEnv(gym.Env):
         current_pos, _ = self.sim.get_state()
         dist_to_goal = np.linalg.norm(current_pos - self.goal_pos)
         
-        # Smart Brakes
+        # Smart Brakes (ADJUSTED)
         slowdown_radius = 0.05
         brake_factor = 1.0
         if dist_to_goal < slowdown_radius:
@@ -127,28 +126,28 @@ class OT2PrecisionEnv(gym.Env):
         new_dist = np.linalg.norm(pos - self.goal_pos)
         dist_mm = new_dist * 1000.0
         
-        # ⚖️ REWARD SYSTEM (Delta-based)
-        # 1. Progress Reward: Positive if getting closer, Negative if moving away
-        # Multiplied by 100 to make the numbers meaningful to the brain
+        # ⚖️ REWARD SYSTEM
+        # 1. Progress Reward
         progress = (self.prev_dist - new_dist) * 100.0 
         reward = progress 
 
-        # 2. Precision Bonus (The Magnet)
-        # Only active when very close, to encourage that final millimeter
+        # 2. Precision Bonus (ADJUSTED)
         if new_dist < 0.01: 
-            reward += 0.1 # Small bonus for being in the "danger zone"
-            # Strong velocity penalty inside the zone to force a stop
-            reward -= np.linalg.norm(vel) * 0.5 
+            reward += 0.1 
+            # FIX: Reduced velocity penalty from 0.5 to 0.05
+            # This allows the agent to make micro-adjustments without fear
+            reward -= np.linalg.norm(vel) * 0.05
 
-        # 3. Time Penalty (Efficiency)
+        # 3. Time Penalty
         reward -= 0.05 
         
         terminated = False
         if new_dist < 0.001: # 1mm Success
-            reward += 10.0 # Big finish
+            reward += 20.0 # FIX: Boosted from 10.0 to 20.0 to prioritize finishing
             terminated = True
         
-        truncated = self.steps >= 500
+        # FIX: Increased max steps from 500 to 1200 (~5 seconds)
+        truncated = self.steps >= 1200
         
         self.prev_dist = new_dist
         info = {"dist_mm": dist_mm}
@@ -184,7 +183,7 @@ class PerformanceLogger(BaseCallback):
 def main():
     task = Task.init(
         project_name='Mentor Group - Myrthe/Group 1', 
-        task_name='OT2_Shotgun_Training',
+        task_name='OT2_Shotgun_Training_Fixed',
         output_uri=True 
     )
     
@@ -205,10 +204,10 @@ def main():
     )
     
     callback = PerformanceLogger(check_freq=5000)
-    print("Starting Training (Shotgun Mode)...")
+    print("Starting Training (Shotgun Mode - Fixed Timing)...")
     
     model.learn(total_timesteps=10_000_000, callback=callback)
-    model.save("final_model_shotgun")
+    model.save("final_model_shotgun_fixed")
 
 if __name__ == "__main__":
     main()
