@@ -166,7 +166,7 @@ class OT2Env(gym.Env):
     def _calculate_reward(self, distance_to_goal, velocity, max_velocity):
 
         # Time penalty - punish every step
-        time_penalty = -0.1
+        time_penalty = -0.2
 
         # Distance penalty (encourages moving toward goal)
         distance_penalty = -5.0 * distance_to_goal
@@ -176,7 +176,7 @@ class OT2Env(gym.Env):
         
         # Low velocity bonus near goal
         velocity_magnitude = np.linalg.norm(velocity)
-        if distance_to_goal < 0.03:
+        if distance_to_goal < 0.005:
             low_velocity_bonus = (max_velocity - velocity_magnitude) * 2.0
         else:
             low_velocity_bonus = 0.0
