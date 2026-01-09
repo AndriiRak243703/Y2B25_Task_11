@@ -5,12 +5,12 @@ import pybullet as p
 import pybullet_data
 import sys
 import subprocess
-from collections import deque
+import os
 from typing import Callable
 from clearml import Task
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback
-from stable_baselines3.common.vec_env import DummyVecEnv
+from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
 # Ensure Tensorboard
 try:
@@ -70,7 +70,7 @@ class Simulation:
         return np.array(pos), np.array(vel)
 
 # ==========================================
-# 🧠 ENVIRONMENT (Shotgun + Delta Reward)
+# 🧠 ENVIRONMENT
 # ==========================================
 class OT2PrecisionEnv(gym.Env):
     def __init__(self, render=False):
@@ -83,37 +83,33 @@ class OT2PrecisionEnv(gym.Env):
         self.goal_pos = np.zeros(3)
         self.steps = 0
         self.max_vel = 0.1 
-        self.prev_dist = 0.0
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         self.steps = 0
-
         pos, vel = self.sim.reset()
         
-        # 🎲 SHOTGUN RESET: Random distance between 1mm and 200mm
+        # Shotgun Reset
         rand_dist = self.np_random.uniform(0.001, 0.20) 
-        
         random_dir = self.np_random.uniform(-1, 1, size=3)
         random_dir /= np.linalg.norm(random_dir) + 1e-6
         self.goal_pos = pos + (random_dir * rand_dist)
         
-        self.prev_dist = np.linalg.norm(pos - self.goal_pos)
         return self._get_obs(pos, vel), {}
 
     def _get_obs(self, pos, vel):
         rel_pos = self.goal_pos - pos
         dist = np.linalg.norm(rel_pos)
-        return np.concatenate([rel_pos * 100.0, vel * 10.0, [dist * 100.0]]).astype(np.float32)
+        # REMOVED MANUAL SCALING (*100). VecNormalize handles this better.
+        return np.concatenate([rel_pos, vel, [dist]]).astype(np.float32)
 
     def step(self, action):
         self.steps += 1
         
-        # Physics
+        # Physics & Smart Brakes
         current_pos, _ = self.sim.get_state()
         dist_to_goal = np.linalg.norm(current_pos - self.goal_pos)
         
-        # Smart Brakes (ADJUSTED)
         slowdown_radius = 0.05
         brake_factor = 1.0
         if dist_to_goal < slowdown_radius:
@@ -122,34 +118,30 @@ class OT2PrecisionEnv(gym.Env):
         scaled_action = action * self.max_vel * brake_factor
         pos, vel = self.sim.run(scaled_action, num_steps=1)
         
-        # 📏 Calculate Distance
+        # 📏 Distance
         new_dist = np.linalg.norm(pos - self.goal_pos)
         dist_mm = new_dist * 1000.0
         
-        # ⚖️ REWARD SYSTEM
-        # 1. Progress Reward
-        progress = (self.prev_dist - new_dist) * 100.0 
-        reward = progress 
-
-        # 2. Precision Bonus (ADJUSTED)
+        # ⚖️ REWARD SYSTEM (Dense Distance Cost)
+        # ----------------------------------------------------
+        # 1. Distance Penalty: The closer you are, the less you lose.
+        # This creates a "slope" that pulls the agent to 0 everywhere.
+        reward = -new_dist 
+        
+        # 2. Precision Bonus (Only when very close)
         if new_dist < 0.01: 
             reward += 0.1 
-            # FIX: Reduced velocity penalty from 0.5 to 0.05
-            # This allows the agent to make micro-adjustments without fear
-            reward -= np.linalg.norm(vel) * 0.05
+            # Small penalty for high velocity near goal
+            reward -= np.linalg.norm(vel) * 0.01
 
-        # 3. Time Penalty
-        reward -= 0.05 
-        
+        # 3. Success Spike
         terminated = False
-        if new_dist < 0.001: # 1mm Success
-            reward += 20.0 # FIX: Boosted from 10.0 to 20.0 to prioritize finishing
+        if new_dist < 0.001: 
+            reward += 10.0 # Big reward to dominate the negative sum
             terminated = True
         
-        # FIX: Increased max steps from 500 to 1200 (~5 seconds)
         truncated = self.steps >= 1200
         
-        self.prev_dist = new_dist
         info = {"dist_mm": dist_mm}
         return self._get_obs(pos, vel), float(reward), terminated, truncated, info
 
@@ -164,12 +156,14 @@ class PerformanceLogger(BaseCallback):
         self.best_mm = float('inf')
 
     def _on_step(self) -> bool:
-        if self.locals['dones'][0]:
-            info = self.locals['infos'][0]
-            dist_mm = info.get('dist_mm', 0.0)
-            self.dist_buffer.append(dist_mm)
-            if dist_mm < self.best_mm: self.best_mm = dist_mm
-            self.logger.record("train/final_dist_mm", dist_mm)
+        # Access the underlying env for info because VecNormalize wraps it
+        infos = self.locals['infos']
+        for info in infos:
+            if 'dist_mm' in info:
+                dist_mm = info['dist_mm']
+                self.dist_buffer.append(dist_mm)
+                if dist_mm < self.best_mm: self.best_mm = dist_mm
+                self.logger.record("train/final_dist_mm", dist_mm)
 
         if self.n_calls % self.check_freq == 0 and self.dist_buffer:
             avg_dist = np.mean(self.dist_buffer[-50:])
@@ -183,13 +177,18 @@ class PerformanceLogger(BaseCallback):
 def main():
     task = Task.init(
         project_name='Mentor Group - Myrthe/Group 1', 
-        task_name='OT2_Shotgun_Training_Fixed',
+        task_name='OT2_Shotgun_Training_Normalized',
         output_uri=True 
     )
     
+    # 1. Create Env
     env = DummyVecEnv([lambda: OT2PrecisionEnv(render=False)])
     
-    # Decaying LR + Low Entropy = Precision
+    # 2. Add VecNormalize (CRITICAL FIX)
+    # This automatically scales observations and rewards to Mean=0, Std=1
+    # This stabilizes PPO significantly.
+    env = VecNormalize(env, norm_obs=True, norm_reward=True, clip_obs=10.)
+    
     model = PPO(
         "MlpPolicy", 
         env, 
@@ -204,10 +203,13 @@ def main():
     )
     
     callback = PerformanceLogger(check_freq=5000)
-    print("Starting Training (Shotgun Mode - Fixed Timing)...")
+    print("Starting Training (Normalized + Distance Cost)...")
     
     model.learn(total_timesteps=10_000_000, callback=callback)
-    model.save("final_model_shotgun_fixed")
+    
+    # SAVE MODEL AND NORMALIZATION STATS
+    model.save("final_model_shotgun")
+    env.save("vec_normalize.pkl") # Important: Save stats for loading later!
 
 if __name__ == "__main__":
     main()
