@@ -187,7 +187,7 @@ class OT2Env(gym.Env):
         # Success bonus (only when settled)
         success_bonus = 50.0 if self.settled else 0.0
         
-        reward = time_penalty + proximity_bonus + low_velocity_bonus + settling_bonus + success_bonus
+        reward = time_penalty + distance_penalty + proximity_bonus + low_velocity_bonus + settling_bonus + success_bonus
         
         return float(reward)
     
