@@ -164,9 +164,12 @@ class OT2Env(gym.Env):
         return observation, reward, terminated, truncated, info
     
     def _calculate_reward(self, distance_to_goal, velocity, max_velocity):
-        
+
         # Time penalty - punish every step
         time_penalty = -0.1
+
+        # Distance penalty (encourages moving toward goal)
+        distance_penalty = -5.0 * distance_to_goal
         
         # Exponential proximity bonus
         proximity_bonus = 10.0 * np.exp(-distance_to_goal / 0.005)
