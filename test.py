@@ -52,7 +52,7 @@ task.set_repo(
     branch='hris'
 )
 
-task.set_packages(['stable-baselines3', 'gymnasium', 'tensorboard', 'pybullet', 'shimmy'])
+task.set_packages(['stable-baselines3', 'gymnasium', 'tensorboard', 'pybullet', 'shimmy', 'clearml'])
 
 # Send to remote queue
 task.execute_remotely(queue_name='default')
