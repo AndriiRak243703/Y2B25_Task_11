@@ -42,7 +42,7 @@ parser.add_argument("--total_timesteps", type=int, default=1_000_000)
 parser.add_argument("--gamma", type=float, default=0.99)
 args = parser.parse_args()
 
-task.execute_remotely(queue_name='default')
+##task.execute_remotely(queue_name='default')
 
 # ==============================
 # 🧪 ENVIRONMENT WRAPPER
