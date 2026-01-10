@@ -25,6 +25,7 @@ task = Task.init(
     project_name='Mentor Group - Myrthe/Group 1',
     task_name=f'OT2_PPO_DenseReward_{PERSON_NAME}',
     output_uri=True
+    reuse_last_task_id=False
 )
 
 task.set_base_docker('deanis/2023y2b-rl:latest')
