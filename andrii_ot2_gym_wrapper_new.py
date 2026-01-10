@@ -112,7 +112,7 @@ class OT2Env(gym.Env):
         action = np.asarray(action, dtype=np.float32)
         
         # Scale action to velocity range
-        max_velocity = 2.0
+        max_velocity = 1.0
         velocity = action * max_velocity
         
         # Create full action array with gripper command (0)
