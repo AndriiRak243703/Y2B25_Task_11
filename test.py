@@ -22,7 +22,7 @@ from clearml import Task
 torch.set_num_threads(2)
 
 # ==========================================
-# ⚙️ ARGS (Adjustable from ClearML UI)
+# ⚙️ ARGS
 # ==========================================
 parser = argparse.ArgumentParser()
 parser.add_argument("--learning_rate", type=float, default=1e-3)
@@ -40,13 +40,13 @@ args = parser.parse_args()
 # ==========================================
 task = Task.init(
     project_name='Mentor Group - Myrthe/Group 1',
-    task_name='OT2_SAC_HER_Server_Run',
+    task_name='OT2_SAC_HER_Final_Run',
     output_uri=True
 )
 
 task.set_base_docker('deanis/2023y2b-rl:latest')
 
-# ⚠️ CORRECT REPO AND BRANCH
+# 👇 POINTING TO YOUR SPECIFIC BRANCH
 task.set_repo(
     repo='https://github.com/AndriiRak243703/Y2B25_Task_11.git', 
     branch='hris'
@@ -54,13 +54,10 @@ task.set_repo(
 
 task.set_packages(['stable-baselines3', 'gymnasium', 'tensorboard', 'pybullet', 'shimmy', 'clearml'])
 
-# Send to remote queue
 task.execute_remotely(queue_name='default')
 
-print("🚀 Task sent to queue! Computing on server...")
-
 # ==========================================
-# 📊 AGGRESSIVE LOGGER
+# 📊 CUSTOM LOGGER
 # ==========================================
 class HumanReadableLogCallback(BaseCallback):
     def _on_step(self) -> bool:
@@ -72,7 +69,7 @@ class HumanReadableLogCallback(BaseCallback):
         return True
 
 # ==========================================
-# 🚀 SIMULATION
+# 🚀 SIMULATION (WITH SMART FILE FINDER)
 # ==========================================
 class Simulation:
     def __init__(self, render=False):
@@ -86,20 +83,41 @@ class Simulation:
         p.setAdditionalSearchPath(pybullet_data.getDataPath())
         p.setGravity(0, 0, 0)
         
-        # 🛡️ ROBUST PATH FINDING FOR SERVER
-        # Finds URDFs relative to this script, wherever it is located
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        plane_path = os.path.join(script_dir, "plane.urdf")
-        robot_path = os.path.join(script_dir, "ot_2_simulation_v6.urdf")
+        # 🔎 INTELLIGENT FILE FINDER 🔎
+        def find_file(filename):
+            # 1. Check current directory
+            if os.path.exists(filename): 
+                return filename
+            
+            # 2. Check the specific folder seen in your screenshot
+            # This handles the case where the server clones the repo root
+            possible_path = os.path.join(os.getcwd(), "hris", "rl-training", filename)
+            if os.path.exists(possible_path):
+                print(f"✅ Found {filename} in subfolder: {possible_path}")
+                return possible_path
 
-        # Try robust path first, fallback to simple filename if needed
+            # 3. Deep search (Recursive walk) - The backup plan
+            print(f"⚠️ Looking recursively for {filename}...")
+            for root, dirs, files in os.walk(os.getcwd()):
+                if filename in files:
+                    found_path = os.path.join(root, filename)
+                    print(f"✅ Found {filename} at: {found_path}")
+                    return found_path
+            
+            # 4. Fail
+            raise FileNotFoundError(f"❌ CRITICAL: Could not find '{filename}' anywhere in {os.getcwd()}")
+
+        # Load Plane
         try:
+            plane_path = find_file("plane.urdf")
             p.loadURDF(plane_path)
-            self.robotId = p.loadURDF(robot_path, [0, 0, 0], useFixedBase=True)
         except:
-            print("⚠️ Warning: Could not find URDFs at absolute path. Trying relative...")
-            p.loadURDF("plane.urdf")
-            self.robotId = p.loadURDF("ot_2_simulation_v6.urdf", [0, 0, 0], useFixedBase=True)
+            print("⚠️ Could not find plane.urdf, using default PyBullet plane.")
+            p.loadURDF("plane.urdf") # Fallback to internal PyBullet data
+
+        # Load Robot (The important one)
+        robot_path = find_file("ot_2_simulation_v6.urdf")
+        self.robotId = p.loadURDF(robot_path, [0, 0, 0], useFixedBase=True)
 
         self.pipette_offset = [0.073, 0.0895, 0.0895]
         self.joints = [0, 1, 2]
@@ -141,7 +159,7 @@ class OT2PrecisionEnv(gym.Env):
         self.sim = Simulation(render=False)
         
         self.max_vel = 0.2 
-        self.distance_threshold = 0.01  # 1cm goal
+        self.distance_threshold = 0.01
 
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(3,), dtype=np.float32)
         obs_dim = 3
@@ -171,7 +189,7 @@ class OT2PrecisionEnv(gym.Env):
         
         self.goal = pos + direction * rand_dist
         
-        # 🛡️ SAFETY CLAMP: Fix for "Ghost Goals"
+        # 🛡️ SAFETY CLAMP
         self.goal[0] = np.clip(self.goal[0], -0.25, 0.25)
         self.goal[1] = np.clip(self.goal[1], -0.25, 0.25)
         self.goal[2] = np.clip(self.goal[2], 0.0, 0.35)
