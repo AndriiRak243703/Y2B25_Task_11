@@ -77,7 +77,7 @@ def main():
 
     # PPO Model
     model = PPO(
-        "MultiInputPolicy",
+        "MlpPolicy",
         env,
         learning_rate=args.learning_rate,
         n_steps=args.n_steps,
