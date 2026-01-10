@@ -1,6 +1,7 @@
 import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
+import pybullet as p  # <--- IMPORTED DIRECTLY HERE
 from sim_class import Simulation 
 
 class OT2Env(gym.Env):
@@ -25,14 +26,15 @@ class OT2Env(gym.Env):
 
         # ✨ VISUAL GOAL MARKER SETUP
         if self.render_enabled:
-            # Create a small red visual-only sphere (no physics collision)
-            self.goal_marker_id = self.sim.p.createVisualShape(
-                shapeType=self.sim.p.GEOM_SPHERE,
+            # Create a small red visual-only sphere
+            # We use 'p' directly now, not 'self.sim.p'
+            self.goal_marker_id = p.createVisualShape(
+                shapeType=p.GEOM_SPHERE,
                 radius=0.01, 
                 rgbaColor=[1, 0, 0, 0.7] # Red and slightly transparent
             )
             # Spawn the marker body
-            self.marker_body_id = self.sim.p.createMultiBody(
+            self.marker_body_id = p.createMultiBody(
                 baseVisualShapeIndex=self.goal_marker_id,
                 basePosition=[0, 0, -1] # Hide it initially
             )
@@ -63,7 +65,7 @@ class OT2Env(gym.Env):
 
         # ✨ TELEPORT MARKER TO GOAL
         if self.render_enabled and hasattr(self, 'marker_body_id'):
-            self.sim.p.resetBasePositionAndOrientation(
+            p.resetBasePositionAndOrientation(
                 self.marker_body_id, self.goal, [0, 0, 0, 1]
             )
 
