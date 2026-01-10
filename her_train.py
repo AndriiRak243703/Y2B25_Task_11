@@ -24,7 +24,7 @@ DEBUG_MODE = True  # ✅ Set to True for Local Visuals, False for ClearML Cloud
 task = Task.init(
     project_name='Mentor Group - Myrthe/Group 1',
     task_name=f'OT2_PPO_DenseReward_{PERSON_NAME}',
-    output_uri=True
+    output_uri=True,
     reuse_last_task_id=False
 )
 
