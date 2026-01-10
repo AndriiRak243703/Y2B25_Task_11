@@ -40,13 +40,12 @@ args = parser.parse_args()
 # ==========================================
 task = Task.init(
     project_name='Mentor Group - Myrthe/Group 1',
-    task_name='OT2_SAC_HER_Final_Run',
+    task_name='OT2_SAC_HER_CustomURDF_Run',
     output_uri=True
 )
 
 task.set_base_docker('deanis/2023y2b-rl:latest')
 
-# 👇 POINTING TO YOUR SPECIFIC BRANCH
 task.set_repo(
     repo='https://github.com/AndriiRak243703/Y2B25_Task_11.git', 
     branch='hris'
@@ -69,7 +68,7 @@ class HumanReadableLogCallback(BaseCallback):
         return True
 
 # ==========================================
-# 🚀 SIMULATION (WITH SMART FILE FINDER)
+# 🚀 SIMULATION (UPDATED NAMES)
 # ==========================================
 class Simulation:
     def __init__(self, render=False):
@@ -85,37 +84,33 @@ class Simulation:
         
         # 🔎 INTELLIGENT FILE FINDER 🔎
         def find_file(filename):
-            # 1. Check current directory
             if os.path.exists(filename): 
                 return filename
             
-            # 2. Check the specific folder seen in your screenshot
-            # This handles the case where the server clones the repo root
+            # Check the specific folder seen in your repo
             possible_path = os.path.join(os.getcwd(), "hris", "rl-training", filename)
             if os.path.exists(possible_path):
                 print(f"✅ Found {filename} in subfolder: {possible_path}")
                 return possible_path
 
-            # 3. Deep search (Recursive walk) - The backup plan
-            print(f"⚠️ Looking recursively for {filename}...")
+            print(f"⚠️ Recursive search for {filename}...")
             for root, dirs, files in os.walk(os.getcwd()):
                 if filename in files:
                     found_path = os.path.join(root, filename)
                     print(f"✅ Found {filename} at: {found_path}")
                     return found_path
             
-            # 4. Fail
-            raise FileNotFoundError(f"❌ CRITICAL: Could not find '{filename}' anywhere in {os.getcwd()}")
+            raise FileNotFoundError(f"❌ CRITICAL: Could not find '{filename}' anywhere!")
 
-        # Load Plane
+        # 👇 UPDATED: Load 'custom.urdf' instead of 'plane.urdf'
         try:
-            plane_path = find_file("plane.urdf")
+            plane_path = find_file("custom.urdf")
             p.loadURDF(plane_path)
         except:
-            print("⚠️ Could not find plane.urdf, using default PyBullet plane.")
-            p.loadURDF("plane.urdf") # Fallback to internal PyBullet data
+            print("⚠️ Could not find custom.urdf, using default PyBullet plane.")
+            p.loadURDF("plane.urdf") 
 
-        # Load Robot (The important one)
+        # Load Robot
         robot_path = find_file("ot_2_simulation_v6.urdf")
         self.robotId = p.loadURDF(robot_path, [0, 0, 0], useFixedBase=True)
 
