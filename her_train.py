@@ -2,6 +2,7 @@ import os
 import argparse
 import numpy as np
 import torch
+from clearml import Task
 
 from stable_baselines3 import PPO
 from stable_baselines3.common.monitor import Monitor
@@ -11,99 +12,82 @@ from gymnasium.wrappers import TimeLimit
 from her_wrapper import OT2Env
 
 # ==============================
-# 🔧 CONFIGURATION (EDIT THESE)
+# 🔧 CONFIGURATION
 # ==============================
-PERSON_NAME = "241236"          # e.g., "myrthe"
-BRANCH_NAME = "hris"        # e.g., "myrthe_branch"
-ENTRYPOINT = '241236_train_ot2.py'
-
-# Import your custom environment
+PERSON_NAME = "241236"
+DEBUG_MODE = True  # SET TO FALSE TO RUN ON THE SERVER
 
 # ==============================
 # 📦 CLEARML SETUP
 # ==============================
-from clearml import Task
-
 task = Task.init(
     project_name='Mentor Group - Myrthe/Group 1',
     task_name=f'OT2_PPO_DenseReward_{PERSON_NAME}',
     output_uri=True
 )
-task.set_base_docker('deanis/2023y2b-rl:latest')
-task.set_repo(repo='https://github.com/AndriiRak243703/Y2B25_Task_11.git', branch=BRANCH_NAME)
-task.set_packages(['stable-baselines3', 'gymnasium', 'pybullet', 'numpy', 'clearml', 'tensorboard'])
 
-# Parse args BEFORE execute_remotely
+if not DEBUG_MODE:
+    task.execute_remotely(queue_name='default')
+    task.set_base_docker('deanis/2023y2b-rl:latest')
+    task.set_packages(['stable-baselines3', 'gymnasium', 'pybullet', 'numpy'])
+
+# Hyperparameters
 parser = argparse.ArgumentParser()
 parser.add_argument("--learning_rate", type=float, default=3e-4)
-parser.add_argument("--batch_size", type=int, default=64)
+parser.add_argument("--batch_size", type=int, default=128)
 parser.add_argument("--n_steps", type=int, default=2048)
 parser.add_argument("--total_timesteps", type=int, default=1_000_000)
-parser.add_argument("--gamma", type=float, default=0.99)
-args = parser.parse_args()
-
-##task.execute_remotely(queue_name='default')
+args, _ = parser.parse_known_args()
 
 # ==============================
-# 🧪 ENVIRONMENT WRAPPER
+# 🧪 HELPER FUNCTIONS
 # ==============================
-def make_wrapped_env(render=False):
-    env = OT2Env(render=render)
-    env = TimeLimit(env, max_episode_steps=1000)
+def make_wrapped_env():
+    # Only render if we are debugging locally
+    env = OT2Env(render=DEBUG_MODE)
     env = Monitor(env, info_keywords=("is_success", "dist_mm"))
     return env
 
-# ==============================
-# 🏁 MAIN TRAINING
-# ==============================
 def main():
-    print(f"🚀 Starting PPO training for {PERSON_NAME} on branch {BRANCH_NAME}")
+    print(f"🚀 Training starting. Debug Mode: {DEBUG_MODE}")
     
-    # Vectorized training envs
-    env = make_vec_env(make_wrapped_env, n_envs=4, seed=42)
+    # Environments
+    num_envs = 1 if DEBUG_MODE else 4
+    env = make_vec_env(make_wrapped_env, n_envs=num_envs)
     
-    # Evaluation env
-    eval_env = make_wrapped_env(render=False)
+    # Eval Callback
+    eval_env = make_wrapped_env()
     eval_callback = EvalCallback(
         eval_env,
         best_model_save_path=f"./models/{PERSON_NAME}/",
         log_path=f"./logs/{PERSON_NAME}/",
-        eval_freq=max(5000 // 4, 1),  # adjust for vec envs
-        n_eval_episodes=20,
+        eval_freq=max(10000 // num_envs, 1),
+        n_eval_episodes=5,
         deterministic=True,
-        render=False,
         verbose=1,
     )
 
-    # PPO Model
+    # Model
     model = PPO(
         "MlpPolicy",
         env,
         learning_rate=args.learning_rate,
         n_steps=args.n_steps,
         batch_size=args.batch_size,
-        gamma=args.gamma,
-        gae_lambda=0.95,
-        ent_coef=0.01,
-        vf_coef=0.5,
-        max_grad_norm=0.5,
-        tensorboard_log="./ppo_tensorboard/",
         verbose=1,
+        tensorboard_log="./ppo_tensorboard/"
     )
 
-    print(f"Intialized PPO. Training for {args.total_timesteps} timesteps...")
+    # Learn
     model.learn(
         total_timesteps=args.total_timesteps,
         callback=eval_callback,
-        progress_bar=False,
+        progress_bar=True
     )
 
-    # Save final model
-    timestamp = task.get_task_start_time().strftime("%y%m%d.%H%M")
-    model_name = f"{timestamp}_{PERSON_NAME}_lr{args.learning_rate:.0e}_b{args.batch_size}_s{args.n_steps}.zip"
-    model.save(model_name)
-    print(f"✅ Saved model: {model_name}")
-    task.upload_artifact("final_model", artifact_object=model_name)
+    # Save
+    model.save(f"ppo_ot2_{PERSON_NAME}")
+    task.upload_artifact("final_model", artifact_object=f"ppo_ot2_{PERSON_NAME}.zip")
 
 if __name__ == "__main__":
     main()
