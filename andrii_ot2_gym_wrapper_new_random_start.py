@@ -76,7 +76,14 @@ class OT2Env(gym.Env):
         
         # Reset simulation
         state_dict = self.sim.reset(num_agents=1)
-        
+
+        start_position = np.random.uniform(
+            self.workspace_low, 
+            self.workspace_high
+        ).astype(np.float32)
+        self.sim.set_start_position(*start_position)
+
+        state_dict = self.sim.get_states()
         # Extract current position
         current_pos = self._extract_position(state_dict)
         print(f"Start: {current_pos}, Goal: {self.goal_position}, Distance: {np.linalg.norm(current_pos - self.goal_position):.4f}")
