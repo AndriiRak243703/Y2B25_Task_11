@@ -151,7 +151,7 @@ def main():
     callback = FineTuneLogger(check_freq=5000)
     
     # Run for 1M steps of pure stabilization
-    model.learn(total_timesteps=1_000_000, callback=callback)
+    model.learn(total_timesteps=3_000_000, callback=callback)
     
     model.save("mastered_ot2_model")
     print("Mastery model saved as mastered_ot2_model.zip")
