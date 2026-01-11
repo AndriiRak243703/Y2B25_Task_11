@@ -50,7 +50,7 @@ class OT2Env(gym.Env):
         )
         
         # OT-2 workspace bounds (verified from simulation)
-        self.workspace_low = np.array([-0.1871, -0.1706, 0.1700], dtype=np.float32)
+        self.workspace_low = np.array([-0.1871, -0.1706, 0.1195], dtype=np.float32)
         self.workspace_high = np.array([0.2532, 0.2197, 0.2897], dtype=np.float32)
         
         # Episode tracking
