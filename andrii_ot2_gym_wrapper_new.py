@@ -188,11 +188,11 @@ class OT2Env(gym.Env):
         proximity_bonus = 10.0 * np.exp(-distance_to_goal / 0.005)
         
         # Low velocity bonus near goal
-        velocity_magnitude = np.linalg.norm(velocity)
-        if distance_to_goal < 0.005:
-            low_velocity_bonus = (max_velocity - velocity_magnitude) * 2.0
-        else:
-            low_velocity_bonus = 0.0
+        # velocity_magnitude = np.linalg.norm(velocity)
+        # if distance_to_goal < 0.005:
+        #     low_velocity_bonus = (max_velocity - velocity_magnitude) * 2.0
+        # else:
+        #     low_velocity_bonus = 0.0
 
         # Settling bonus (each step within threshold)
         settling_bonus = 20.0 if distance_to_goal <= self.target_threshold else 0.0
@@ -200,7 +200,7 @@ class OT2Env(gym.Env):
         # Success bonus (only when settled)
         success_bonus = 200.0 if self.settled else 0.0
         
-        reward = time_penalty + progress_reward + proximity_bonus + low_velocity_bonus + settling_bonus + success_bonus
+        reward = time_penalty + progress_reward + proximity_bonus + settling_bonus + success_bonus
         
         return float(reward)
     
