@@ -146,7 +146,8 @@ class OT2Env(gym.Env):
         info = {
             'distance_to_goal': float(distance_to_goal),
             'current_position': current_pos.tolist(),
-            'goal_position': self.goal_position.tolist()
+            'goal_position': self.goal_position.tolist(),
+            'is_success': terminated
         }
         
         return observation, reward, terminated, truncated, info
