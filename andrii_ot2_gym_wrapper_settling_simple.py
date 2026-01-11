@@ -61,6 +61,7 @@ class OT2Env(gym.Env):
         # To ensure that agent does not overshoot
         self.settled_threshold = 5
         self.settling_counter = 0
+        self.previous_settling_counter = 0
         self.settled = False
     
     def reset(self, seed=None):
@@ -102,6 +103,7 @@ class OT2Env(gym.Env):
 
         # Reset settling parameters
         self.settling_counter = 0
+        self.previous_settling_counter = 0
         self.settled = False
         
         # Verify observation shape and dtype
@@ -143,6 +145,7 @@ class OT2Env(gym.Env):
         # Calculate reward
         reward = self._calculate_reward(distance_to_goal, velocity, max_velocity)
         self.previous_distance = distance_to_goal
+        self.previous_settling_counter = self.settling_counter
 
         # Check if goal reached
         terminated = bool(self.settled)
@@ -184,8 +187,14 @@ class OT2Env(gym.Env):
         # Distance penalty - punish being far from goal
         distance_penalty = -10.0 * distance_to_goal
 
-        # Settling bonus (each step within threshold)
-        settling_bonus = 20.0 if distance_to_goal <= self.target_threshold else 0.0
+        # Settling delta bonus
+        settling_delta = self.settling_counter - self.previous_settling_counter
+        if settling_delta > 0:
+            settling_bonus = 20
+        elif settling_delta < 0:
+            settling_bonus = 30 * settling_delta
+        else:
+            settling_bonus = 0
 
         # Success bonus (only when settled)
         success_bonus = 200.0 if self.settled else 0.0
