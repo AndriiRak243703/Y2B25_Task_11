@@ -167,7 +167,8 @@ class OT2Env(gym.Env):
         info = {
             'distance_to_goal': float(distance_to_goal),
             'current_position': current_pos.tolist(),
-            'goal_position': self.goal_position.tolist()
+            'goal_position': self.goal_position.tolist(),
+            'is_success': terminated
         }
         
         return observation, reward, terminated, truncated, info
@@ -180,7 +181,7 @@ class OT2Env(gym.Env):
         else:
             time_penalty = 0.0
 
-        # Reward based on progress (same reward scale for any goal distance): 0 at start, 1 at goal
+        # Reward based on progress
         progress_reward = 10.0 * (self.previous_distance - distance_to_goal) / self.initial_distance
         
         # Exponential proximity bonus

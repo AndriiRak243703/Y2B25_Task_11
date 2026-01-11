@@ -58,7 +58,7 @@ class OT2Callback(BaseCallback):
                         self.episode_rewards.append(ep_reward)
                         self.episode_lengths.append(ep_length)
                         
-                        success = float(final_dist < self.threshold)
+                        success = float(info.get('is_success', False))
                         self.episode_successes.append(success)
                         self.episode_final_distances.append(final_dist)
                         
