@@ -175,7 +175,7 @@ class OT2Env(gym.Env):
         distance_penalty = -10.0 * distance_to_goal
         
         # Success bonus
-        success_bonus = 1000.0 if distance_to_goal < self.target_threshold else 0.0
+        success_bonus = 2000.0 if distance_to_goal < self.target_threshold else 0.0
         
         reward = time_penalty + distance_penalty + success_bonus
         

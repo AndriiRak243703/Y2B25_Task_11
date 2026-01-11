@@ -190,14 +190,14 @@ class OT2Env(gym.Env):
         # Settling delta bonus
         settling_delta = self.settling_counter - self.previous_settling_counter
         if settling_delta > 0:
-            settling_bonus = 20
+            settling_bonus = 3
         elif settling_delta < 0:
-            settling_bonus = 30 * settling_delta
+            settling_bonus = 3 * settling_delta
         else:
             settling_bonus = 0
 
         # Success bonus (only when settled)
-        success_bonus = 200.0 if self.settled else 0.0
+        success_bonus = 100.0 if self.settled else 0.0
         
         reward = time_penalty + distance_penalty + settling_bonus + success_bonus
         
