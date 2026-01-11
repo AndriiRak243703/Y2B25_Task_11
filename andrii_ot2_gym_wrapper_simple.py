@@ -50,7 +50,7 @@ class OT2Env(gym.Env):
         )
         
         # OT-2 workspace bounds (verified from simulation)
-        self.workspace_low = np.array([-0.1871, -0.1706, 0.1195], dtype=np.float32)
+        self.workspace_low = np.array([-0.1871, -0.1706, 0.1700], dtype=np.float32)
         self.workspace_high = np.array([0.2532, 0.2197, 0.2897], dtype=np.float32)
         
         # Episode tracking
@@ -72,8 +72,13 @@ class OT2Env(gym.Env):
         # Reset simulation
         state_dict = self.sim.reset(num_agents=1)
         
+        # Set fixed start position with correct Z coordinates
+        self.sim.set_start_position(0.073, 0.0895, 0.1700)
+        state_dict = self.sim.get_states()
+
         # Extract current position
         current_pos = self._extract_position(state_dict)
+        print(f"Start: {current_pos}, Goal: {self.goal_position}, Distance: {np.linalg.norm(current_pos - self.goal_position):.4f}")
         
         # Store initial distance for reward scaling
         self.initial_distance = float(np.linalg.norm(current_pos - self.goal_position))

@@ -7,7 +7,7 @@ from datetime import datetime
 import numpy as np
 
 # Import wrapper
-from andrii_ot2_gym_wrapper_new import OT2Env
+from andrii_ot2_gym_wrapper_simple import OT2Env
 
 # ============================================================================
 # CONFIGURATION
